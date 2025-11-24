@@ -83,9 +83,11 @@ class EncovaLogin:
             logger.info(f"Remote debugging ENABLED - Port: {REMOTE_DEBUGGING_PORT}")
             logger.info(f"Browser will be accessible at: http://localhost:{REMOTE_DEBUGGING_PORT}")
             logger.info(f"Connect via Chrome: chrome://inspect")
+            logger.info(f"Railway proxy URL: maglev.proxy.rlwy.net:20292")
             # Force headless=False when remote debugging is enabled
             actual_headless = False
             logger.info(f"Headless mode: {actual_headless} (forced False for remote debugging)")
+            logger.info(f"Waiting for browser to initialize... Tabs will appear after navigation to a page")
         else:
             logger.info("Remote debugging DISABLED")
             actual_headless = BROWSER_HEADLESS
@@ -124,6 +126,16 @@ class EncovaLogin:
         
         self.page = await self.context.new_page()
         self.page.set_default_timeout(BROWSER_TIMEOUT)
+        
+        # For remote debugging: Navigate to a page so tabs appear in chrome://inspect
+        if ENABLE_REMOTE_DEBUGGING:
+            try:
+                logger.info("Navigating to about:blank to make browser visible in remote debugging...")
+                await self.page.goto("about:blank", wait_until="domcontentloaded", timeout=5000)
+                await asyncio.sleep(1)  # Wait a moment for remote debugging to register the page
+                logger.info("Browser page ready - should now be visible in chrome://inspect")
+            except Exception as e:
+                logger.warning(f"Could not navigate initial page for remote debugging: {e}")
         
         # Comprehensive anti-detection script to prevent Okta from blocking
         await self.page.add_init_script("""
