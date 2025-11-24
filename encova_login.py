@@ -1912,6 +1912,34 @@ class EncovaLogin:
                         await button.click()
                         button_clicked = True
                         logger.info("Successfully clicked 'Save & Close' button")
+                        
+                        # Wait for post-save actions (modal, navigation, etc.)
+                        await asyncio.sleep(WAIT_MEDIUM)
+                        
+                        # Check for modals or dialogs that might appear
+                        try:
+                            # Wait for any modal to appear (with short timeout)
+                            modal = await self.page.wait_for_selector(
+                                '.modal, .dialog, [role="dialog"], .popup',
+                                timeout=3000,
+                                state='visible'
+                            )
+                            if modal:
+                                logger.info("Modal/dialog detected after save - waiting for it to close...")
+                                # Wait for modal to disappear or click OK/Close if present
+                                try:
+                                    ok_button = await self.page.wait_for_selector(
+                                        'button:has-text("OK"), button:has-text("Close"), .modal button.primary',
+                                        timeout=5000
+                                    )
+                                    if ok_button:
+                                        await ok_button.click()
+                                        logger.info("Clicked OK/Close in modal")
+                                except Exception:
+                                    pass  # Modal might close automatically
+                        except Exception:
+                            pass  # No modal appeared, which is fine
+                        
                         break
                         
                 except Exception as e:
