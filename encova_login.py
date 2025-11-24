@@ -63,6 +63,10 @@ class EncovaLogin:
         self.playwright = None
         self.task_id = task_id or "default"
         self.cookies_file = SESSION_DIR / "encova_cookies.json"
+        # Video recording path
+        self.video_dir = LOG_DIR / "videos"
+        self.video_dir.mkdir(parents=True, exist_ok=True)
+        self.video_path = self.video_dir / f"{self.task_id}.webm"
         
     async def init_browser(self) -> None:
         """Initialize browser with persistent context for cookie storage"""
@@ -74,11 +78,17 @@ class EncovaLogin:
         user_data_dir.mkdir(parents=True, exist_ok=True)
         
         # Use persistent context to save cookies with better fingerprinting evasion
+        # Enable video recording to see what's happening
         self.context = await self.playwright.chromium.launch_persistent_context(
             user_data_dir=str(user_data_dir),
             headless=BROWSER_HEADLESS,
             viewport={"width": 1920, "height": 1080},
             user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+            # Record video of the session
+            record_video={
+                "dir": str(self.video_dir),
+                "size": {"width": 1920, "height": 1080}
+            },
             # Add extra args to avoid detection (Okta-specific)
             args=[
                 '--disable-blink-features=AutomationControlled',

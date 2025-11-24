@@ -508,12 +508,22 @@ async def run_automation_task(task_id: str, data: dict, credentials: dict):
                 else:
                     logger.warning(f"[TASK {task_id}] Failed to save form")
             
+            # Get video path if available
+            video_path = None
+            if login_handler:
+                try:
+                    video_path = str(login_handler.get_video_path())
+                    logger.info(f"[TASK {task_id}] Video recorded: {video_path}")
+                except Exception as e:
+                    logger.debug(f"[TASK {task_id}] Could not get video path: {e}")
+            
             active_sessions[task_id] = {
                 "status": "completed",
                 "login_handler": login_handler,
                 "task_id": task_id,
                 "completed_at": datetime.now().isoformat(),
-                "fields_filled": filled_count if 'form_data' in data else 0
+                "fields_filled": filled_count if 'form_data' in data else 0,
+                "video_path": video_path
             }
             logger.info(f"[TASK {task_id}] Task completed successfully!")
         else:
@@ -527,12 +537,23 @@ async def run_automation_task(task_id: str, data: dict, credentials: dict):
             
     except Exception as e:
         logger.error(f"[TASK {task_id}] Automation task error: {e}", exc_info=True)
+        
+        # Get video path even if task failed
+        video_path = None
+        if login_handler:
+            try:
+                video_path = str(login_handler.get_video_path())
+                logger.info(f"[TASK {task_id}] Video recorded (task failed): {video_path}")
+            except Exception as e:
+                logger.debug(f"[TASK {task_id}] Could not get video path: {e}")
+        
         active_sessions[task_id] = {
             "status": "error",
             "error": str(e),
             "error_type": type(e).__name__,
             "task_id": task_id,
-            "failed_at": datetime.now().isoformat()
+            "failed_at": datetime.now().isoformat(),
+            "video_path": video_path
         }
     finally:
         # Note: Don't close browser here if you want to keep session alive

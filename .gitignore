@@ -23,6 +23,9 @@ sessions/
 logs/
 *.log
 
+# Videos (keep directory structure but ignore video files)
+logs/videos/*.webm
+
 # IDE
 .vscode/
 .idea/
