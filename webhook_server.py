@@ -39,6 +39,9 @@ CORS(app, resources={
 # Store active login sessions
 active_sessions = {}
 
+# Store task progress for debugging
+task_progress = {}  # task_id -> {step, message, timestamp}
+
 # Queue system for managing concurrent requests
 task_queue = queue.Queue()
 MAX_WORKERS = 3  # Maximum concurrent browser instances
@@ -622,6 +625,10 @@ def get_task_status(task_id: str):
                     "url": f"{base_url}/screenshot/{task_id}/{screenshot.get('filename')}"
                 })
             status['screenshot_urls'] = screenshot_urls
+        
+        # Add progress information
+        if task_id in task_progress:
+            status['progress'] = task_progress[task_id]
         
         logger.info(f"Task {task_id} status: {status.get('status')}")
         return jsonify(status), 200
