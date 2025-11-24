@@ -508,14 +508,14 @@ async def run_automation_task(task_id: str, data: dict, credentials: dict):
                 else:
                     logger.warning(f"[TASK {task_id}] Failed to save form")
             
-            # Get video path if available
-            video_path = None
+            # Get screenshot info
+            screenshots = []
             if login_handler:
                 try:
-                    video_path = str(login_handler.get_video_path())
-                    logger.info(f"[TASK {task_id}] Video recorded: {video_path}")
+                    screenshots = login_handler.list_screenshots()
+                    logger.info(f"[TASK {task_id}] Screenshots: {len(screenshots)} taken")
                 except Exception as e:
-                    logger.debug(f"[TASK {task_id}] Could not get video path: {e}")
+                    logger.debug(f"[TASK {task_id}] Could not get screenshots: {e}")
             
             active_sessions[task_id] = {
                 "status": "completed",
@@ -523,7 +523,8 @@ async def run_automation_task(task_id: str, data: dict, credentials: dict):
                 "task_id": task_id,
                 "completed_at": datetime.now().isoformat(),
                 "fields_filled": filled_count if 'form_data' in data else 0,
-                "video_path": video_path
+                "screenshots": screenshots,
+                "screenshot_count": len(screenshots)
             }
             logger.info(f"[TASK {task_id}] Task completed successfully!")
         else:
@@ -541,14 +542,14 @@ async def run_automation_task(task_id: str, data: dict, credentials: dict):
     except Exception as e:
         logger.error(f"[TASK {task_id}] Automation task error: {e}", exc_info=True)
         
-        # Get video path even if task failed
-        video_path = None
+        # Get screenshot info even if task failed
+        screenshots = []
         if login_handler:
             try:
-                video_path = str(login_handler.get_video_path())
-                logger.info(f"[TASK {task_id}] Video recorded (task failed): {video_path}")
+                screenshots = login_handler.list_screenshots()
+                logger.info(f"[TASK {task_id}] Screenshots (task failed): {len(screenshots)} taken")
             except Exception as e:
-                logger.debug(f"[TASK {task_id}] Could not get video path: {e}")
+                logger.debug(f"[TASK {task_id}] Could not get screenshots: {e}")
         
         active_sessions[task_id] = {
             "status": "error",
@@ -556,30 +557,26 @@ async def run_automation_task(task_id: str, data: dict, credentials: dict):
             "error_type": type(e).__name__,
             "task_id": task_id,
             "failed_at": datetime.now().isoformat(),
-            "video_path": video_path
+            "screenshots": screenshots,
+            "screenshot_count": len(screenshots)
         }
     finally:
-        # Close browser to finalize video recording
+        # Close browser and update screenshot info
         if login_handler:
             try:
-                logger.info(f"[TASK {task_id}] Closing browser to finalize video...")
+                logger.info(f"[TASK {task_id}] Closing browser...")
                 await login_handler.close()
-                logger.info(f"[TASK {task_id}] Browser closed, video should be finalized")
+                logger.info(f"[TASK {task_id}] Browser closed")
                 
-                # Update video_path in active_sessions if video was created
+                # Update screenshots in active_sessions
                 try:
-                    video_path = login_handler.get_video_path()
-                    if video_path and video_path.exists():
-                        # Update the session with actual video path
-                        if task_id in active_sessions:
-                            active_sessions[task_id]["video_path"] = str(video_path)
-                            logger.info(f"[TASK {task_id}] Video path updated: {video_path}")
-                        else:
-                            logger.warning(f"[TASK {task_id}] Task not in active_sessions to update video path")
-                    else:
-                        logger.warning(f"[TASK {task_id}] Video file does not exist at: {video_path}")
+                    screenshots = login_handler.list_screenshots()
+                    if task_id in active_sessions:
+                        active_sessions[task_id]["screenshots"] = screenshots
+                        active_sessions[task_id]["screenshot_count"] = len(screenshots)
+                        logger.info(f"[TASK {task_id}] Screenshots updated: {len(screenshots)}")
                 except Exception as e:
-                    logger.debug(f"[TASK {task_id}] Could not update video path: {e}")
+                    logger.debug(f"[TASK {task_id}] Could not update screenshots: {e}")
             except Exception as e:
                 logger.error(f"[TASK {task_id}] Error closing browser: {e}")
 
@@ -665,71 +662,71 @@ def stop_task(task_id: str):
         }), 404
 
 
-@app.route('/video/<task_id>', methods=['GET'])
-def get_video(task_id: str):
-    """Download video for a specific task"""
+@app.route('/screenshot/<task_id>/<filename>', methods=['GET'])
+def get_screenshot(task_id: str, filename: str):
+    """Download a specific screenshot for a task"""
     try:
         from pathlib import Path
-        video_dir = LOG_DIR / "videos"
-        video_path = video_dir / f"{task_id}.webm"
+        screenshot_path = LOG_DIR / "screenshots" / task_id / filename
         
-        if not video_path.exists():
-            logger.warning(f"Video not found for task: {task_id}")
+        if not screenshot_path.exists():
+            logger.warning(f"Screenshot not found: {task_id}/{filename}")
             return jsonify({
                 "status": "not_found",
-                "message": f"Video not found for task {task_id}"
+                "message": f"Screenshot not found: {filename}"
             }), 404
         
-        logger.info(f"Serving video for task {task_id}: {video_path}")
+        logger.info(f"Serving screenshot: {screenshot_path}")
         return send_file(
-            str(video_path),
-            mimetype='video/webm',
+            str(screenshot_path),
+            mimetype='image/png',
             as_attachment=True,
-            download_name=f"{task_id}.webm"
+            download_name=filename
         )
     except Exception as e:
-        logger.error(f"Error serving video for task {task_id}: {e}", exc_info=True)
+        logger.error(f"Error serving screenshot {task_id}/{filename}: {e}", exc_info=True)
         return jsonify({
             "status": "error",
             "message": str(e)
         }), 500
 
 
-@app.route('/videos', methods=['GET'])
-def list_videos():
-    """List all available videos"""
+@app.route('/screenshots/<task_id>', methods=['GET'])
+def list_task_screenshots(task_id: str):
+    """List all screenshots for a specific task"""
     try:
         from pathlib import Path
-        import os
-        from datetime import datetime
+        screenshot_dir = LOG_DIR / "screenshots" / task_id
         
-        video_dir = LOG_DIR / "videos"
-        video_dir.mkdir(parents=True, exist_ok=True)
+        if not screenshot_dir.exists():
+            return jsonify({
+                "task_id": task_id,
+                "total": 0,
+                "screenshots": []
+            }), 200
         
-        videos = []
-        for video_file in video_dir.glob("*.webm"):
+        screenshots = []
+        for screenshot_file in sorted(screenshot_dir.glob("*.png")):
             try:
-                stat = video_file.stat()
-                videos.append({
-                    "task_id": video_file.stem,
-                    "filename": video_file.name,
+                stat = screenshot_file.stat()
+                screenshots.append({
+                    "name": screenshot_file.stem,
+                    "filename": screenshot_file.name,
                     "size_bytes": stat.st_size,
-                    "size_mb": round(stat.st_size / (1024 * 1024), 2),
+                    "size_kb": round(stat.st_size / 1024, 2),
                     "created_at": datetime.fromtimestamp(stat.st_mtime).isoformat(),
-                    "download_url": f"/video/{video_file.stem}"
+                    "url": f"/screenshot/{task_id}/{screenshot_file.name}"
                 })
             except Exception as e:
-                logger.debug(f"Error getting info for {video_file}: {e}")
-        
-        # Sort by creation time (newest first)
-        videos.sort(key=lambda x: x['created_at'], reverse=True)
+                logger.debug(f"Error getting info for {screenshot_file}: {e}")
         
         return jsonify({
-            "total": len(videos),
-            "videos": videos
+            "task_id": task_id,
+            "total": len(screenshots),
+            "screenshots": screenshots
         }), 200
     except Exception as e:
-        logger.error(f"Error listing videos: {e}", exc_info=True)
+        logger.error(f"Error listing screenshots for task {task_id}: {e}", exc_info=True)
         return jsonify({
             "status": "error",
             "message": str(e)

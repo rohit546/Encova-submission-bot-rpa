@@ -63,10 +63,9 @@ class EncovaLogin:
         self.playwright = None
         self.task_id = task_id or "default"
         self.cookies_file = SESSION_DIR / "encova_cookies.json"
-        # Video recording path
-        self.video_dir = LOG_DIR / "videos"
-        self.video_dir.mkdir(parents=True, exist_ok=True)
-        self.video_path = self.video_dir / f"{self.task_id}.webm"
+        # Screenshot directory
+        self.screenshot_dir = LOG_DIR / "screenshots" / self.task_id
+        self.screenshot_dir.mkdir(parents=True, exist_ok=True)
         
     async def init_browser(self) -> None:
         """Initialize browser with persistent context for cookie storage"""
@@ -106,12 +105,7 @@ class EncovaLogin:
             }
         )
         
-        # Create page with video recording
-        # For persistent contexts, video recording must be set at page level
-        self.page = await self.context.new_page(
-            record_video_path=str(self.video_path),
-            record_video_size={"width": 1920, "height": 1080}
-        )
+        self.page = await self.context.new_page()
         self.page.set_default_timeout(BROWSER_TIMEOUT)
         
         # Comprehensive anti-detection script to prevent Okta from blocking
@@ -666,19 +660,39 @@ class EncovaLogin:
             logger.info(f"Screenshot saved to {screenshot_path}")
             return False
     
+    async def take_screenshot(self, name: str) -> Path:
+        """Take a screenshot and save it"""
+        try:
+            screenshot_path = self.screenshot_dir / f"{name}.png"
+            await self.page.screenshot(path=str(screenshot_path), full_page=True)
+            logger.info(f"Screenshot saved: {screenshot_path}")
+            return screenshot_path
+        except Exception as e:
+            logger.error(f"Error taking screenshot {name}: {e}")
+            return None
+    
     async def login(self) -> bool:
         """Main login method - handles both auto-login and first-time login"""
         try:
             await self.init_browser()
+            await self.take_screenshot("01_browser_initialized")
             await self.load_cookies()
             
             if await self.check_auto_login():
+                await self.take_screenshot("02_auto_login_success")
                 return True
             
-            return await self.perform_login()
+            await self.take_screenshot("03_before_login")
+            result = await self.perform_login()
+            if result:
+                await self.take_screenshot("04_after_login")
+            else:
+                await self.take_screenshot("04_login_failed")
+            return result
             
         except Exception as e:
             logger.error(f"Login error: {e}")
+            await self.take_screenshot("error_login")
             return False
     
     async def navigate_to_new_quote_search(self) -> bool:
