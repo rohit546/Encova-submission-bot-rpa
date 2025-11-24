@@ -660,31 +660,78 @@ class EncovaLogin:
             logger.info(f"Screenshot saved to {screenshot_path}")
             return False
     
-    async def take_screenshot(self, name: str) -> Path:
-        """Take a screenshot and save it"""
+    async def take_screenshot(self, name: str, wait_for_content: bool = True) -> Path:
+        """Take a screenshot with debugging information"""
         try:
+            # Get page state for debugging
+            try:
+                url = self.page.url
+                title = await self.page.title()
+                ready_state = await self.page.evaluate("document.readyState")
+                body_text = await self.page.evaluate("document.body ? document.body.innerText.substring(0, 200) : 'No body'")
+                has_content = len(body_text.strip()) > 0
+            except Exception as e:
+                url = "unknown"
+                title = "unknown"
+                ready_state = "unknown"
+                body_text = ""
+                has_content = False
+                logger.debug(f"Could not get page state: {e}")
+            
+            logger.info(f"Taking screenshot '{name}': URL={url}, Title={title}, ReadyState={ready_state}, HasContent={has_content}")
+            
+            # Wait a bit for content to render if needed
+            if wait_for_content and not has_content:
+                logger.info(f"Waiting for content before screenshot '{name}'...")
+                try:
+                    # Wait for body or some content
+                    await self.page.wait_for_load_state("domcontentloaded", timeout=5000)
+                    await asyncio.sleep(0.5)  # Small delay for rendering
+                except Exception:
+                    pass  # Continue even if wait times out
+            
             screenshot_path = self.screenshot_dir / f"{name}.png"
             await self.page.screenshot(path=str(screenshot_path), full_page=True)
-            logger.info(f"Screenshot saved: {screenshot_path}")
+            
+            # Log additional debug info
+            file_size = screenshot_path.stat().st_size if screenshot_path.exists() else 0
+            logger.info(f"Screenshot saved: {screenshot_path} ({file_size} bytes) - URL: {url}")
+            
+            # If screenshot is suspiciously small (likely blank), log warning
+            if file_size < 5000:  # Very small file, likely blank
+                logger.warning(f"Screenshot '{name}' is very small ({file_size} bytes) - may be blank!")
+                logger.warning(f"  URL: {url}, ReadyState: {ready_state}, HasContent: {has_content}")
+            
             return screenshot_path
         except Exception as e:
-            logger.error(f"Error taking screenshot {name}: {e}")
+            logger.error(f"Error taking screenshot {name}: {e}", exc_info=True)
             return None
     
     async def login(self) -> bool:
         """Main login method - handles both auto-login and first-time login"""
         try:
             await self.init_browser()
-            await self.take_screenshot("01_browser_initialized")
+            # Don't take screenshot immediately - page hasn't loaded yet
+            # await self.take_screenshot("01_browser_initialized", wait_for_content=False)
             await self.load_cookies()
             
             if await self.check_auto_login():
                 await self.take_screenshot("02_auto_login_success")
                 return True
             
-            await self.take_screenshot("03_before_login")
+            # Navigate to login page first, then take screenshot
+            logger.info("Navigating to login page...")
+            try:
+                await self.page.goto(ENCOVA_LOGIN_URL, wait_until="load", timeout=TIMEOUT_PAGE)
+                await asyncio.sleep(1)  # Wait for page to render
+                await self.take_screenshot("03_before_login")
+            except Exception as e:
+                logger.error(f"Failed to navigate to login page: {e}")
+                await self.take_screenshot("03_navigation_failed", wait_for_content=False)
+            
             result = await self.perform_login()
             if result:
+                await asyncio.sleep(1)  # Wait for post-login page to load
                 await self.take_screenshot("04_after_login")
             else:
                 await self.take_screenshot("04_login_failed")
@@ -692,7 +739,7 @@ class EncovaLogin:
             
         except Exception as e:
             logger.error(f"Login error: {e}")
-            await self.take_screenshot("error_login")
+            await self.take_screenshot("error_login", wait_for_content=False)
             return False
     
     async def navigate_to_new_quote_search(self) -> bool:
