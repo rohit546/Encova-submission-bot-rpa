@@ -30,6 +30,10 @@ BROWSER_HEADLESS = os.getenv("BROWSER_HEADLESS", "True").lower() == "true"
 BROWSER_TIMEOUT = int(os.getenv("BROWSER_TIMEOUT", "30000"))  # milliseconds
 BROWSER_USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
 
+# Remote Debugging Configuration
+REMOTE_DEBUGGING_PORT = int(os.getenv("REMOTE_DEBUGGING_PORT", "9222"))
+ENABLE_REMOTE_DEBUGGING = os.getenv("ENABLE_REMOTE_DEBUGGING", "False").lower() == "true"
+
 # Timing Constants (seconds)
 WAIT_SHORT = 0.3
 WAIT_MEDIUM = 0.5

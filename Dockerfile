@@ -62,6 +62,8 @@ ENV WEBHOOK_PORT=5000
 
 # Expose webhook port
 EXPOSE 5000
+# Expose remote debugging port (9222) if needed for debugging
+EXPOSE 9222
 
 # Health check
 HEALTHCHECK --interval=30s --timeout=10s --start-period=40s --retries=3 \
