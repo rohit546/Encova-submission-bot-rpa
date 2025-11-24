@@ -701,7 +701,8 @@ class EncovaLogin:
             
             # Wait for network to be idle
             try:
-                await self.page.wait_for_load_state("networkidle", timeout=30000)
+                # Use domcontentloaded for better reliability, networkidle can timeout in containers
+                await self.page.wait_for_load_state("domcontentloaded", timeout=TIMEOUT_PAGE)
             except Exception as e:
                 logger.debug(f"Network idle wait: {e}")
             
