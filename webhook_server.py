@@ -598,6 +598,13 @@ def get_task_status(task_id: str):
                 status['max_workers'] = MAX_WORKERS
                 status['estimated_wait_time'] = f"~{status.get('queue_position', 0) * 5} minutes"  # Rough estimate
         
+        # Add video download URL if video exists
+        if status.get('video_path'):
+            status['video_url'] = f"/video/{task_id}"
+            # Get the base URL from request
+            base_url = request.url_root.rstrip('/')
+            status['video_download_url'] = f"{base_url}/video/{task_id}"
+        
         logger.info(f"Task {task_id} status: {status.get('status')}")
         return jsonify(status), 200
     else:
