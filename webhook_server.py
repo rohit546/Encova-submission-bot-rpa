@@ -7,7 +7,7 @@ import logging
 import threading
 import queue
 from datetime import datetime
-from flask import Flask, request, jsonify
+from flask import Flask, request, jsonify, send_file, abort
 from flask_cors import CORS
 from encova_login import EncovaLogin
 from config import (
@@ -649,6 +649,77 @@ def stop_task(task_id: str):
             "status": "not_found",
             "message": f"Task {task_id} not found"
         }), 404
+
+
+@app.route('/video/<task_id>', methods=['GET'])
+def get_video(task_id: str):
+    """Download video for a specific task"""
+    try:
+        from pathlib import Path
+        video_dir = LOG_DIR / "videos"
+        video_path = video_dir / f"{task_id}.webm"
+        
+        if not video_path.exists():
+            logger.warning(f"Video not found for task: {task_id}")
+            return jsonify({
+                "status": "not_found",
+                "message": f"Video not found for task {task_id}"
+            }), 404
+        
+        logger.info(f"Serving video for task {task_id}: {video_path}")
+        return send_file(
+            str(video_path),
+            mimetype='video/webm',
+            as_attachment=True,
+            download_name=f"{task_id}.webm"
+        )
+    except Exception as e:
+        logger.error(f"Error serving video for task {task_id}: {e}", exc_info=True)
+        return jsonify({
+            "status": "error",
+            "message": str(e)
+        }), 500
+
+
+@app.route('/videos', methods=['GET'])
+def list_videos():
+    """List all available videos"""
+    try:
+        from pathlib import Path
+        import os
+        from datetime import datetime
+        
+        video_dir = LOG_DIR / "videos"
+        video_dir.mkdir(parents=True, exist_ok=True)
+        
+        videos = []
+        for video_file in video_dir.glob("*.webm"):
+            try:
+                stat = video_file.stat()
+                videos.append({
+                    "task_id": video_file.stem,
+                    "filename": video_file.name,
+                    "size_bytes": stat.st_size,
+                    "size_mb": round(stat.st_size / (1024 * 1024), 2),
+                    "created_at": datetime.fromtimestamp(stat.st_mtime).isoformat(),
+                    "download_url": f"/video/{video_file.stem}"
+                })
+            except Exception as e:
+                logger.debug(f"Error getting info for {video_file}: {e}")
+        
+        # Sort by creation time (newest first)
+        videos.sort(key=lambda x: x['created_at'], reverse=True)
+        
+        return jsonify({
+            "total": len(videos),
+            "videos": videos
+        }), 200
+    except Exception as e:
+        logger.error(f"Error listing videos: {e}", exc_info=True)
+        return jsonify({
+            "status": "error",
+            "message": str(e)
+        }), 500
 
 
 @app.route('/queue/status', methods=['GET'])
