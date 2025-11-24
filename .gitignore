@@ -38,3 +38,6 @@ Thumbs.db
 *.tmp
 *.bak
 *.cache
+
+# Railway configuration (keep this)
+!railway.json
