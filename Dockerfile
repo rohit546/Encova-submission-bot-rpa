@@ -10,6 +10,7 @@ RUN apt-get update && apt-get install -y \
     gnupg \
     ca-certificates \
     fonts-liberation \
+    fonts-unifont \
     libasound2 \
     libatk-bridge2.0-0 \
     libatk1.0-0 \
@@ -40,7 +41,10 @@ RUN pip install --no-cache-dir -r requirements.txt
 
 # Install Playwright browsers
 RUN playwright install chromium
-RUN playwright install-deps chromium
+
+# Install additional dependencies (skip if fails - we already have most deps)
+# Note: Some font packages may not be available in all Debian versions
+RUN playwright install-deps chromium || true
 
 # Copy application code
 COPY . .
