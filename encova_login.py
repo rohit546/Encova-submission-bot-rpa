@@ -527,7 +527,15 @@ class EncovaLogin:
             logger.info(f"Navigating to {ENCOVA_LOGIN_URL}...")
             # Use 'load' instead of 'networkidle' for better reliability in containerized environments
             # networkidle can timeout if there are background requests that never complete
-            await self.page.goto(ENCOVA_LOGIN_URL, wait_until="load", timeout=TIMEOUT_PAGE)
+            try:
+                await self.page.goto(ENCOVA_LOGIN_URL, wait_until="load", timeout=TIMEOUT_PAGE)
+                await asyncio.sleep(1)  # Wait for page to render
+                await self.take_screenshot("03_1_after_goto")
+            except Exception as e:
+                logger.error(f"Navigation failed: {e}")
+                await self.take_screenshot("03_1_goto_failed", wait_for_content=False)
+                raise
+            
             await asyncio.sleep(WAIT_OKTA_PROCESS)
             
             # Check for F5 Networks policy block and handle it automatically
@@ -719,15 +727,17 @@ class EncovaLogin:
                 await self.take_screenshot("02_auto_login_success")
                 return True
             
-            # Navigate to login page first, then take screenshot
-            logger.info("Navigating to login page...")
+            # perform_login will handle navigation, so we don't need to navigate here
+            # Just take a screenshot of the initial state
             try:
-                await self.page.goto(ENCOVA_LOGIN_URL, wait_until="load", timeout=TIMEOUT_PAGE)
-                await asyncio.sleep(1)  # Wait for page to render
-                await self.take_screenshot("03_before_login")
+                current_url = self.page.url
+                logger.info(f"Current page URL before login: {current_url}")
+                if current_url == "about:blank" or not current_url:
+                    logger.info("Page is blank, will navigate in perform_login")
+                else:
+                    await self.take_screenshot("03_initial_state")
             except Exception as e:
-                logger.error(f"Failed to navigate to login page: {e}")
-                await self.take_screenshot("03_navigation_failed", wait_for_content=False)
+                logger.debug(f"Could not get initial state: {e}")
             
             result = await self.perform_login()
             if result:
