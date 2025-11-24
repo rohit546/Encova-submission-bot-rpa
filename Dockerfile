@@ -67,6 +67,7 @@ EXPOSE 5000
 HEALTHCHECK --interval=30s --timeout=10s --start-period=40s --retries=3 \
     CMD python -c "import requests; requests.get('http://localhost:5000/health', timeout=5)" || exit 1
 
-# Run webhook server
-CMD ["python", "webhook_server.py"]
+# Run webhook server with gunicorn for production
+# Note: webhook_server.py needs to be importable as a module
+CMD gunicorn --bind 0.0.0.0:5000 --workers 1 --threads 4 --timeout 300 --access-logfile - --error-logfile - --preload webhook_server:app
 

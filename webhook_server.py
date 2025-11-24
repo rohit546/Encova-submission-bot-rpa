@@ -637,15 +637,11 @@ def queue_status():
     }), 200
 
 
-if __name__ == '__main__':
+# Initialize worker threads when module is imported (for gunicorn)
+def init_workers():
+    """Initialize worker threads for queue system"""
     logger.info("=" * 80)
     logger.info("ENCOVA AUTOMATION WEBHOOK SERVER")
-    logger.info("=" * 80)
-    logger.info(f"Starting webhook server on {WEBHOOK_HOST}:{WEBHOOK_PORT}")
-    logger.info(f"Webhook endpoint: http://{WEBHOOK_HOST}:{WEBHOOK_PORT}{WEBHOOK_PATH}")
-    logger.info(f"Health check: http://{WEBHOOK_HOST}:{WEBHOOK_PORT}/health")
-    logger.info(f"Queue status: http://{WEBHOOK_HOST}:{WEBHOOK_PORT}/queue/status")
-    logger.info(f"Logs directory: {LOG_DIR}")
     logger.info("=" * 80)
     logger.info(f"Queue System: {MAX_WORKERS} worker threads")
     logger.info("Starting worker threads...")
@@ -659,6 +655,16 @@ if __name__ == '__main__':
     logger.info("=" * 80)
     logger.info("Server ready to accept requests from Next.js app...")
     logger.info("=" * 80)
+
+# Initialize workers when module loads (for gunicorn)
+init_workers()
+
+if __name__ == '__main__':
+    logger.info(f"Starting webhook server on {WEBHOOK_HOST}:{WEBHOOK_PORT}")
+    logger.info(f"Webhook endpoint: http://{WEBHOOK_HOST}:{WEBHOOK_PORT}{WEBHOOK_PATH}")
+    logger.info(f"Health check: http://{WEBHOOK_HOST}:{WEBHOOK_PORT}/health")
+    logger.info(f"Queue status: http://{WEBHOOK_HOST}:{WEBHOOK_PORT}/queue/status")
+    logger.info(f"Logs directory: {LOG_DIR}")
     
     app.run(host=WEBHOOK_HOST, port=WEBHOOK_PORT, debug=False)
 
