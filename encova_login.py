@@ -83,15 +83,17 @@ class EncovaLogin:
             logger.info(f"Remote debugging ENABLED - Port: {REMOTE_DEBUGGING_PORT}")
             logger.info(f"Browser will be accessible at: http://localhost:{REMOTE_DEBUGGING_PORT}")
             logger.info(f"Connect via Chrome: chrome://inspect")
-            if BROWSER_HEADLESS:
-                logger.warning("BROWSER_HEADLESS is True - remote debugging may not show tabs properly")
+            # Force headless=False when remote debugging is enabled
+            actual_headless = False
+            logger.info(f"Headless mode: {actual_headless} (forced False for remote debugging)")
         else:
             logger.info("Remote debugging DISABLED")
+            actual_headless = BROWSER_HEADLESS
         
         # Use persistent context to save cookies with better fingerprinting evasion
         self.context = await self.playwright.chromium.launch_persistent_context(
             user_data_dir=str(user_data_dir),
-            headless=BROWSER_HEADLESS,
+            headless=actual_headless,
             viewport={"width": 1920, "height": 1080},
             user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
             # Add extra args to avoid detection (Okta-specific)
