@@ -33,6 +33,8 @@ from config import (
     TIMEOUT_LOGIN,
     TIMEOUT_WIDGET,
     TIMEOUT_PAGE,
+    REMOTE_DEBUGGING_PORT,
+    ENABLE_REMOTE_DEBUGGING,
 )
 
 # Setup logging
