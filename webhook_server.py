@@ -530,13 +530,22 @@ async def run_automation_task(task_id: str, data: dict, credentials: dict):
         else:
             logger.error(f"[TASK {task_id}] Login failed!")
             
-            # Video path will be set in finally block after browser closes
-            # Don't set it here to avoid showing path if video doesn't exist
+            # Get screenshot info even if login failed
+            screenshots = []
+            if login_handler:
+                try:
+                    screenshots = login_handler.list_screenshots()
+                    logger.info(f"[TASK {task_id}] Screenshots (login failed): {len(screenshots)} taken")
+                except Exception as e:
+                    logger.debug(f"[TASK {task_id}] Could not get screenshots: {e}")
+            
             active_sessions[task_id] = {
                 "status": "failed",
                 "error": "Login failed",
                 "task_id": task_id,
-                "failed_at": datetime.now().isoformat()
+                "failed_at": datetime.now().isoformat(),
+                "screenshots": screenshots,
+                "screenshot_count": len(screenshots)
             }
             
     except Exception as e:
