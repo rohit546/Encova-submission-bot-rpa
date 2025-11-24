@@ -541,11 +541,16 @@ class EncovaLogin:
             logger.info("Waiting for Okta login widget to load...")
             
             # Wait for page to be interactive first
+            # Use domcontentloaded instead of networkidle for better reliability
             try:
-                await self.page.wait_for_load_state("domcontentloaded")
-                await self.page.wait_for_load_state("networkidle", timeout=10000)
+                await self.page.wait_for_load_state("domcontentloaded", timeout=TIMEOUT_PAGE)
+                # Try networkidle with shorter timeout, but don't fail if it times out
+                try:
+                    await self.page.wait_for_load_state("networkidle", timeout=15000)
+                except Exception:
+                    logger.debug("Networkidle timeout - continuing anyway (common in containerized environments)")
             except Exception as e:
-                logger.debug(f"Load state wait: {e}")
+                logger.warning(f"Load state wait: {e} - continuing anyway")
             
             # Try multiple strategies to find Okta widget
             widget_found = False
