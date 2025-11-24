@@ -48,7 +48,7 @@ TIMEOUT_MEDIUM = 5000
 TIMEOUT_LONG = 10000
 TIMEOUT_LOGIN = 15000
 TIMEOUT_WIDGET = 20000
-TIMEOUT_PAGE = 60000  # Increased for slow-loading pages
+TIMEOUT_PAGE = 90000  # Increased for slow-loading pages and containerized environments
 
 # Session/Cookie storage
 SESSION_DIR = BASE_DIR / "sessions"

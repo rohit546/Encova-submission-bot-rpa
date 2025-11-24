@@ -325,7 +325,7 @@ class EncovaLogin:
                 if await self._handle_f5_policy_block():
                     logger.info("F5 policy block resolved - navigating to login page for fresh login")
                     # Navigate to login page again after resolving F5 block
-                    await self.page.goto(ENCOVA_LOGIN_URL, wait_until="networkidle")
+                    await self.page.goto(ENCOVA_LOGIN_URL, wait_until="load", timeout=TIMEOUT_PAGE)
                     await asyncio.sleep(WAIT_PAGE_LOAD)
                     # After handling F5 block, we need to login again (cookies were cleared)
                     # Return False to trigger perform_login()
@@ -521,7 +521,9 @@ class EncovaLogin:
                 raise ValueError("Username and password are required for login")
             
             logger.info(f"Navigating to {ENCOVA_LOGIN_URL}...")
-            await self.page.goto(ENCOVA_LOGIN_URL, wait_until="networkidle")
+            # Use 'load' instead of 'networkidle' for better reliability in containerized environments
+            # networkidle can timeout if there are background requests that never complete
+            await self.page.goto(ENCOVA_LOGIN_URL, wait_until="load", timeout=TIMEOUT_PAGE)
             await asyncio.sleep(WAIT_OKTA_PROCESS)
             
             # Check for F5 Networks policy block and handle it automatically
