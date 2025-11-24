@@ -78,6 +78,16 @@ class EncovaLogin:
         user_data_dir = SESSION_DIR / f"browser_data_{self.task_id}"
         user_data_dir.mkdir(parents=True, exist_ok=True)
         
+        # Log remote debugging status
+        if ENABLE_REMOTE_DEBUGGING:
+            logger.info(f"Remote debugging ENABLED - Port: {REMOTE_DEBUGGING_PORT}")
+            logger.info(f"Browser will be accessible at: http://localhost:{REMOTE_DEBUGGING_PORT}")
+            logger.info(f"Connect via Chrome: chrome://inspect")
+            if BROWSER_HEADLESS:
+                logger.warning("BROWSER_HEADLESS is True - remote debugging may not show tabs properly")
+        else:
+            logger.info("Remote debugging DISABLED")
+        
         # Use persistent context to save cookies with better fingerprinting evasion
         self.context = await self.playwright.chromium.launch_persistent_context(
             user_data_dir=str(user_data_dir),
