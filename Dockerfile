@@ -42,9 +42,11 @@ RUN pip install --no-cache-dir -r requirements.txt
 # Install Playwright browsers
 RUN playwright install chromium
 
-# Install additional dependencies (skip if fails - we already have most deps)
-# Note: Some font packages may not be available in all Debian versions
-RUN playwright install-deps chromium || true
+# Note: We skip 'playwright install-deps' because:
+# 1. We already install all necessary system dependencies above
+# 2. Some font packages (ttf-ubuntu-font-family, ttf-unifont) may not be available
+#    in newer Debian versions, causing build failures
+# 3. The manually installed dependencies are sufficient for Chromium to run
 
 # Copy application code
 COPY . .
