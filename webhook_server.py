@@ -567,9 +567,14 @@ async def run_automation_task(task_id: str, data: dict, credentials: dict):
             "video_path": video_path
         }
     finally:
-        # Note: Don't close browser here if you want to keep session alive
-        # await login_handler.close()
-        pass
+        # Close browser to finalize video recording
+        if login_handler:
+            try:
+                logger.info(f"[TASK {task_id}] Closing browser to finalize video...")
+                await login_handler.close()
+                logger.info(f"[TASK {task_id}] Browser closed, video should be finalized")
+            except Exception as e:
+                logger.error(f"[TASK {task_id}] Error closing browser: {e}")
 
 
 @app.route('/task/<task_id>/status', methods=['GET'])
