@@ -315,7 +315,8 @@ class EncovaLogin:
         """Check if already logged in (auto-login scenario)"""
         try:
             logger.info("Checking for auto-login...")
-            await self.page.goto(ENCOVA_LOGIN_URL, wait_until="networkidle")
+            # Use 'load' instead of 'networkidle' for better reliability in containerized environments
+            await self.page.goto(ENCOVA_LOGIN_URL, wait_until="load", timeout=TIMEOUT_PAGE)
             
             await asyncio.sleep(WAIT_PAGE_LOAD)
             
