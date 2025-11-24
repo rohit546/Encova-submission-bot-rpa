@@ -78,18 +78,11 @@ class EncovaLogin:
         user_data_dir.mkdir(parents=True, exist_ok=True)
         
         # Use persistent context to save cookies with better fingerprinting evasion
-        # Enable video recording to see what's happening
         self.context = await self.playwright.chromium.launch_persistent_context(
             user_data_dir=str(user_data_dir),
             headless=BROWSER_HEADLESS,
             viewport={"width": 1920, "height": 1080},
             user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-            # Record video of the entire session - one continuous video from start to finish
-            # Video will be saved when context is closed
-            record_video={
-                "dir": str(self.video_dir),
-                "size": {"width": 1920, "height": 1080}
-            },
             # Add extra args to avoid detection (Okta-specific)
             args=[
                 '--disable-blink-features=AutomationControlled',
@@ -113,7 +106,12 @@ class EncovaLogin:
             }
         )
         
-        self.page = await self.context.new_page()
+        # Create page with video recording
+        # For persistent contexts, video recording must be set at page level
+        self.page = await self.context.new_page(
+            record_video_path=str(self.video_path),
+            record_video_size={"width": 1920, "height": 1080}
+        )
         self.page.set_default_timeout(BROWSER_TIMEOUT)
         
         # Comprehensive anti-detection script to prevent Okta from blocking
@@ -1940,8 +1938,8 @@ class EncovaLogin:
                 # Playwright saves video when context closes
                 await self.context.close()
                 
-                # Wait a moment for video file to be written
-                await asyncio.sleep(1)
+                # Wait longer for video file to be written (Playwright needs time to finalize)
+                await asyncio.sleep(2)
                 
                 # Playwright saves videos with pattern: {page_id}.webm in the video_dir
                 # Find the actual video file that was created
@@ -1950,6 +1948,15 @@ class EncovaLogin:
                 if video_files:
                     # Get the most recently created video file
                     actual_video = max(video_files, key=lambda p: p.stat().st_mtime)
+                    
+                    # Check if file is still being written (size is changing)
+                    initial_size = actual_video.stat().st_size
+                    await asyncio.sleep(1)
+                    final_size = actual_video.stat().st_size
+                    
+                    if final_size > initial_size:
+                        # Still writing, wait a bit more
+                        await asyncio.sleep(2)
                     
                     # Rename to match task_id for easier access
                     final_video = self.video_dir / f"{self.task_id}.webm"
@@ -1963,15 +1970,21 @@ class EncovaLogin:
                             logger.warning(f"Could not rename video: {e}, using: {actual_video}")
                             final_video = actual_video
                     self.video_path = final_video
-                    logger.info(f"Video recorded: {self.video_path}")
+                    logger.info(f"Video recorded: {self.video_path} (size: {final_video.stat().st_size} bytes)")
                 else:
                     logger.warning(f"Video not found in {self.video_dir}")
+                    # List what files are there for debugging
+                    all_files = list(self.video_dir.glob("*"))
+                    if all_files:
+                        logger.info(f"Files in video dir: {[f.name for f in all_files]}")
+                    else:
+                        logger.info(f"Video directory is empty: {self.video_dir}")
                     
             if self.playwright:
                 await self.playwright.stop()
             logger.info("Browser closed and playwright stopped")
         except Exception as e:
-            logger.error(f"Error closing browser: {e}")
+            logger.error(f"Error closing browser: {e}", exc_info=True)
     
     def get_video_path(self) -> Path:
         """Get the path to the recorded video"""
