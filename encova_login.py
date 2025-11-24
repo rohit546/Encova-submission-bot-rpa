@@ -1933,15 +1933,49 @@ class EncovaLogin:
         return self.page
     
     async def close(self) -> None:
-        """Close browser and cleanup"""
+        """Close browser and cleanup - this finalizes the video recording"""
         try:
             if self.context:
+                # Close context - this will finalize video recording
+                # Playwright saves video when context closes
                 await self.context.close()
+                
+                # Wait a moment for video file to be written
+                await asyncio.sleep(1)
+                
+                # Playwright saves videos with pattern: {page_id}.webm in the video_dir
+                # Find the actual video file that was created
+                video_files = list(self.video_dir.glob("*.webm"))
+                
+                if video_files:
+                    # Get the most recently created video file
+                    actual_video = max(video_files, key=lambda p: p.stat().st_mtime)
+                    
+                    # Rename to match task_id for easier access
+                    final_video = self.video_dir / f"{self.task_id}.webm"
+                    if actual_video != final_video:
+                        try:
+                            if final_video.exists():
+                                final_video.unlink()  # Remove old file if exists
+                            actual_video.rename(final_video)
+                            logger.info(f"Video renamed to: {final_video}")
+                        except Exception as e:
+                            logger.warning(f"Could not rename video: {e}, using: {actual_video}")
+                            final_video = actual_video
+                    self.video_path = final_video
+                    logger.info(f"Video recorded: {self.video_path}")
+                else:
+                    logger.warning(f"Video not found in {self.video_dir}")
+                    
             if self.playwright:
                 await self.playwright.stop()
             logger.info("Browser closed and playwright stopped")
         except Exception as e:
             logger.error(f"Error closing browser: {e}")
+    
+    def get_video_path(self) -> Path:
+        """Get the path to the recorded video"""
+        return self.video_path
 
 
 async def main():
