@@ -529,21 +529,13 @@ async def run_automation_task(task_id: str, data: dict, credentials: dict):
         else:
             logger.error(f"[TASK {task_id}] Login failed!")
             
-            # Get video path even if login failed
-            video_path = None
-            if login_handler:
-                try:
-                    video_path = str(login_handler.get_video_path())
-                    logger.info(f"[TASK {task_id}] Video recorded (login failed): {video_path}")
-                except Exception as e:
-                    logger.debug(f"[TASK {task_id}] Could not get video path: {e}")
-            
+            # Video path will be set in finally block after browser closes
+            # Don't set it here to avoid showing path if video doesn't exist
             active_sessions[task_id] = {
                 "status": "failed",
                 "error": "Login failed",
                 "task_id": task_id,
-                "failed_at": datetime.now().isoformat(),
-                "video_path": video_path
+                "failed_at": datetime.now().isoformat()
             }
             
     except Exception as e:
@@ -573,6 +565,21 @@ async def run_automation_task(task_id: str, data: dict, credentials: dict):
                 logger.info(f"[TASK {task_id}] Closing browser to finalize video...")
                 await login_handler.close()
                 logger.info(f"[TASK {task_id}] Browser closed, video should be finalized")
+                
+                # Update video_path in active_sessions if video was created
+                try:
+                    video_path = login_handler.get_video_path()
+                    if video_path and video_path.exists():
+                        # Update the session with actual video path
+                        if task_id in active_sessions:
+                            active_sessions[task_id]["video_path"] = str(video_path)
+                            logger.info(f"[TASK {task_id}] Video path updated: {video_path}")
+                        else:
+                            logger.warning(f"[TASK {task_id}] Task not in active_sessions to update video path")
+                    else:
+                        logger.warning(f"[TASK {task_id}] Video file does not exist at: {video_path}")
+                except Exception as e:
+                    logger.debug(f"[TASK {task_id}] Could not update video path: {e}")
             except Exception as e:
                 logger.error(f"[TASK {task_id}] Error closing browser: {e}")
 
