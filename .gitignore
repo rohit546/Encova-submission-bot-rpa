@@ -23,6 +23,10 @@ sessions/
 logs/
 *.log
 
+# Debug files (traces, screenshots downloaded locally)
+debug/
+debug_screenshots/
+
 # Videos (keep directory structure but ignore video files)
 logs/videos/*.webm
 

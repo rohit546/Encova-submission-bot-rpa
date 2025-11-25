@@ -1,10 +1,12 @@
 """
-Test script to trigger automation with tracing enabled
+Test automation and automatically download trace file
 """
 import requests
 import time
 import sys
 import os
+from pathlib import Path
+from download_trace import download_trace, DEBUG_DIR
 
 # Fix Windows console encoding
 if sys.platform == 'win32':
@@ -15,10 +17,10 @@ if sys.platform == 'win32':
 
 WEBHOOK_URL = "https://encova-submission-bot-rpa-production.up.railway.app/webhook"
 
-def test_trace():
-    """Send a test request and monitor trace file"""
+def test_and_download_trace():
+    """Send a test request, wait for completion, then download trace"""
     print("=" * 80)
-    print("PLAYWRIGHT TRACE TEST")
+    print("TEST AUTOMATION AND DOWNLOAD TRACE")
     print("=" * 80)
     
     # Test data
@@ -78,7 +80,7 @@ def test_trace():
                 current_status = status.get('status', 'unknown')
                 
                 if current_status != last_status:
-                    print(f"\n📊 Status changed: {current_status}")
+                    print(f"\n📊 Status: {current_status}")
                     last_status = current_status
                 
                 if current_status in ['completed', 'failed']:
@@ -86,33 +88,14 @@ def test_trace():
                     print(f"✅ Task {current_status.upper()}")
                     print(f"{'=' * 80}")
                     
-                    # Show trace info
-                    trace_path = status.get('trace_path')
-                    trace_url = status.get('trace_url')
-                    
-                    if trace_path or trace_url:
-                        print(f"\n📦 TRACE FILE INFORMATION:")
-                        if trace_path:
-                            print(f"   📁 Path: {trace_path}")
-                        if trace_url:
-                            print(f"   🔗 Download URL: {trace_url}")
-                            print(f"\n💡 To view the trace:")
-                            print(f"   1. Download: {trace_url}")
-                            print(f"   2. Install Playwright: pip install playwright")
-                            print(f"   3. View trace: playwright show-trace <downloaded_file.zip>")
+                    # Download trace
+                    print(f"\n⬇️  Downloading trace file...")
+                    if download_trace(task_id):
+                        print(f"\n✅ Trace downloaded successfully!")
+                        print(f"📁 Location: {DEBUG_DIR / f'{task_id}.zip'}")
                     else:
-                        print(f"\n⚠️  No trace file found (tracing may be disabled)")
-                    
-                    # Show screenshots
-                    screenshots = status.get('screenshots', [])
-                    screenshot_count = status.get('screenshot_count', 0)
-                    if screenshot_count > 0:
-                        print(f"\n📸 Screenshots: {screenshot_count} taken")
-                        screenshot_urls = status.get('screenshot_urls', [])
-                        if screenshot_urls:
-                            print(f"   🔗 Download URLs:")
-                            for ss in screenshot_urls[:3]:  # Show first 3
-                                print(f"      - {ss.get('url')}")
+                        print(f"\n⚠️  Could not download trace file")
+                        print(f"   Check if tracing is enabled and task completed")
                     
                     break
             else:
@@ -124,9 +107,11 @@ def test_trace():
     
     if time.time() - start_time >= max_wait:
         print(f"\n⏱️  Timeout waiting for task completion")
+        print(f"   You can still try to download the trace manually:")
+        print(f"   python download_trace.py {task_id}")
     
     print(f"\n{'=' * 80}")
 
 if __name__ == "__main__":
-    test_trace()
+    test_and_download_trace()
 
