@@ -2,6 +2,10 @@
 Test automation locally on PC (not via Railway webhook)
 Uses the same mapping logic as webhook_server.py
 """
+import os
+# Disable tracing for local testing - MUST be set before any imports
+os.environ['ENABLE_TRACING'] = 'False'
+
 import asyncio
 import sys
 import time
@@ -140,20 +144,8 @@ async def test_local_automation():
         print(f"✅ AUTOMATION COMPLETED")
         print(f"{'=' * 80}")
         
-        # Show trace info
-        if hasattr(login_handler, 'trace_path') and login_handler.trace_path:
-            trace_path = login_handler.trace_path
-            if trace_path.exists():
-                file_size = trace_path.stat().st_size
-                print(f"\n📦 TRACE FILE:")
-                print(f"   📁 Path: {trace_path}")
-                print(f"   📊 Size: {file_size / (1024*1024):.2f} MB")
-                print(f"\n💡 To view the trace:")
-                print(f"   python -m playwright show-trace \"{trace_path}\"")
-            else:
-                print(f"\n⚠️  Trace file not found: {trace_path}")
-        else:
-            print(f"\n⚠️  Tracing may be disabled")
+        # Trace is disabled for local testing
+        print(f"\n📦 Tracing: Disabled for local testing")
         
         # Show screenshots
         screenshots = login_handler.list_screenshots()
