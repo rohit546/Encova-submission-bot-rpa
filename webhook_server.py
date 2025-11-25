@@ -336,13 +336,7 @@ def worker_thread():
                 browser_lock.release()
                 logger.info(f"[QUEUE] Task {task_id} released browser lock")
                 
-                # Mark task as done
-                task_queue.task_done()
-                with worker_lock:
-                    active_workers -= 1
-                    logger.info(f"[QUEUE] Worker finished. Active workers: {active_workers}/{MAX_WORKERS}")
-                
-                # Mark task as done
+                # Mark task as done in queue
                 task_queue.task_done()
                 
         except queue.Empty:
@@ -576,8 +570,13 @@ async def run_automation_task(task_id: str, data: dict, credentials: dict):
         logger.info(f"[TASK {task_id}] Initializing browser...")
         # Use "default" as task_id for browser_data directory to share cached Angular app
         # This avoids cold cache issues where each task would need to reload Angular from scratch
-        # The task_id is still logged for tracking, but browser uses shared cache
-        login_handler = EncovaLogin(username=username, password=password, task_id="default")
+        # Pass the actual task_id as trace_id so each task has its own trace file
+        login_handler = EncovaLogin(
+            username=username, 
+            password=password, 
+            task_id="default",  # Shared browser cache
+            trace_id=task_id    # Unique trace file per task
+        )
         
         # Run full automation with provided data
         logger.info(f"[TASK {task_id}] Starting full automation...")

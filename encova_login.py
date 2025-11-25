@@ -52,7 +52,16 @@ logger = logging.getLogger(__name__)
 class EncovaLogin:
     """Handles Encova portal login automation"""
     
-    def __init__(self, username: str = None, password: str = None, task_id: str = None):
+    def __init__(self, username: str = None, password: str = None, task_id: str = None, trace_id: str = None):
+        """
+        Initialize EncovaLogin
+        
+        Args:
+            username: Encova username
+            password: Encova password
+            task_id: Used for browser_data folder (use "default" to share cache)
+            trace_id: Used for trace file naming (use actual task ID for unique traces)
+        """
         if not username:
             username = ENCOVA_USERNAME
         if not password:
@@ -64,9 +73,10 @@ class EncovaLogin:
         self.page: Page = None
         self.playwright = None
         self.task_id = task_id or "default"
+        self.trace_id = trace_id or self.task_id  # Use trace_id for trace file naming
         self.cookies_file = SESSION_DIR / "encova_cookies.json"
-        # Trace file path
-        self.trace_path = TRACE_DIR / f"{self.task_id}.zip" if ENABLE_TRACING else None
+        # Trace file path - uses trace_id for unique naming
+        self.trace_path = TRACE_DIR / f"{self.trace_id}.zip" if ENABLE_TRACING else None
         
     async def init_browser(self) -> None:
         """Initialize browser with persistent context for cookie storage"""
