@@ -2026,8 +2026,22 @@ class EncovaLogin:
         return self.page
     
     async def close(self) -> None:
-        """Close browser and cleanup"""
+        """Close browser and cleanup - finalize trace if enabled"""
         try:
+            # Stop tracing and save trace file
+            if ENABLE_TRACING and self.trace_path and self.context:
+                try:
+                    logger.info(f"Stopping trace recording and saving to: {self.trace_path}")
+                    await self.context.tracing.stop(path=str(self.trace_path))
+                    if self.trace_path.exists():
+                        file_size = self.trace_path.stat().st_size
+                        logger.info(f"Trace saved successfully: {self.trace_path} ({file_size} bytes)")
+                        logger.info(f"View trace with: playwright show-trace {self.trace_path}")
+                    else:
+                        logger.warning(f"Trace file was not created: {self.trace_path}")
+                except Exception as e:
+                    logger.error(f"Error saving trace: {e}", exc_info=True)
+            
             if self.context:
                 await self.context.close()
             if self.playwright:

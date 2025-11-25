@@ -11,7 +11,7 @@ from flask import Flask, request, jsonify, send_file, abort
 from flask_cors import CORS
 from encova_login import EncovaLogin
 from config import (
-    WEBHOOK_HOST, WEBHOOK_PORT, WEBHOOK_PATH, LOG_DIR,
+    WEBHOOK_HOST, WEBHOOK_PORT, WEBHOOK_PATH, LOG_DIR, TRACE_DIR,
     ENCOVA_USERNAME, ENCOVA_PASSWORD
 )
 
