@@ -503,6 +503,7 @@ async def run_automation_task(task_id: str, data: dict, credentials: dict):
                 logger.info(f"[TASK {task_id}] Filled {filled_count}/{len(form_data)} fields")
             
             # Handle dropdowns if provided
+            # Skip state dropdown if address validation was used (state is auto-filled)
             if 'dropdowns' in data and data.get('dropdowns'):
                 dropdowns = data.get('dropdowns', [])
                 logger.info(f"[TASK {task_id}] Processing {len(dropdowns)} dropdowns...")
@@ -511,6 +512,11 @@ async def run_automation_task(task_id: str, data: dict, credentials: dict):
                     selector = dropdown.get('selector')
                     value = dropdown.get('value')
                     if selector and value:
+                        # Skip state dropdown (focusser-2) if address validation was used
+                        if address_validation_used and selector == 'focusser-2':
+                            logger.info(f"[TASK {task_id}] Skipping state dropdown (focusser-2) - auto-filled by Address Validation")
+                            continue
+                        
                         try:
                             await login_handler.select_dropdown(selector, value)
                             logger.info(f"[TASK {task_id}] Filled dropdown {i+1}/{len(dropdowns)}: {selector} = {value}")
