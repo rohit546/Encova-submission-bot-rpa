@@ -1,11 +1,10 @@
 """
-Test automation and automatically download trace file
-Works with both local and Railway deployment
+Test local webhook server - sends data to localhost:5000
+Run webhook_server.py first, then run this test
 """
 import requests
 import time
 import sys
-import os
 from pathlib import Path
 
 # Fix Windows console encoding
@@ -15,53 +14,22 @@ if sys.platform == 'win32':
     except:
         pass
 
-# Configuration - change this to switch between local and Railway
-USE_LOCAL = False  # Set to True to test locally, False for Railway
+WEBHOOK_URL = "http://localhost:5000/webhook"
+STATUS_URL_BASE = "http://localhost:5000/task"
+TRACE_URL_BASE = "http://localhost:5000/trace"
+TRACES_DIR = Path(__file__).parent / "traces"
 
-if USE_LOCAL:
-    BASE_URL = "http://localhost:5000"
-else:
-    BASE_URL = "https://encova-submission-bot-rpa-production.up.railway.app"
-
-WEBHOOK_URL = f"{BASE_URL}/webhook"
-TRACES_DIR = Path(__file__).parent / "debug" / "traces"
-TRACES_DIR.mkdir(parents=True, exist_ok=True)
-
-
-def download_trace(task_id: str) -> bool:
-    """Download trace file for a specific task"""
-    trace_url = f"{BASE_URL}/trace/{task_id}"
-    print(f"\n[DOWNLOAD] Fetching trace from: {trace_url}")
-    
-    try:
-        response = requests.get(trace_url, timeout=30)
-        if response.status_code == 200:
-            trace_path = TRACES_DIR / f"{task_id}.zip"
-            trace_path.write_bytes(response.content)
-            print(f"[OK] Trace saved to: {trace_path}")
-            print(f"[VIEW] Run: playwright show-trace {trace_path}")
-            return True
-        elif response.status_code == 404:
-            print(f"[INFO] Trace not found for task {task_id}")
-            return False
-        else:
-            print(f"[ERROR] Server returned: {response.status_code}")
-            return False
-    except Exception as e:
-        print(f"[ERROR] Download failed: {e}")
-        return False
-
-
-def test_and_download_trace():
-    """Send a test request, wait for completion, then download trace"""
+def test_local_webhook():
+    """Send a test request to local webhook server"""
     print("=" * 80)
-    print("TEST AUTOMATION AND DOWNLOAD TRACE")
+    print("TEST LOCAL WEBHOOK SERVER")
     print("=" * 80)
-    print(f"\n[SERVER] {BASE_URL}")
-    print(f"[MODE] {'LOCAL' if USE_LOCAL else 'RAILWAY'}")
+    print("\nMake sure webhook_server.py is running first!")
+    print("Run: python webhook_server.py")
+    print("=" * 80)
     
-    # Test data - same as test_webhook_local.py
-    task_id = f"test_trace_{int(time.time())}"
+    # Test data - matching the format expected by webhook server
+    task_id = f"local_test_{int(time.time())}"
     payload = {
         "action": "start_automation",
         "task_id": task_id,
@@ -81,7 +49,7 @@ def test_and_download_trace():
                 "state": "GA",
                 "addressType": "Business",
                 "contactMethod": "Email",
-                "producer": "Shahnaz Sutar"
+                "producer": "Shahnaz Sutar"  # Producer name
             },
             "save_form": True
         }
@@ -98,20 +66,20 @@ def test_and_download_trace():
         result = response.json()
         print(f"\n[OK] Request accepted: {result.get('message', 'OK')}")
         print(f"[STATUS] {result.get('status', 'unknown')}")
+        
+        if result.get('queue_position'):
+            print(f"[QUEUE] Position: {result['queue_position']}")
     except requests.exceptions.ConnectionError:
-        print(f"\n[ERROR] Could not connect to server!")
-        if USE_LOCAL:
-            print(f"[INFO] Make sure webhook_server.py is running:")
-            print(f"       python webhook_server.py")
-        else:
-            print(f"[INFO] Check if Railway deployment is running")
+        print(f"\n[ERROR] Could not connect to webhook server!")
+        print(f"[INFO] Make sure webhook_server.py is running:")
+        print(f"       python webhook_server.py")
         return
     except Exception as e:
         print(f"\n[ERROR] Failed to send request: {e}")
         return
     
     # Monitor task status
-    status_url = f"{BASE_URL}/task/{task_id}/status"
+    status_url = f"{STATUS_URL_BASE}/{task_id}/status"
     print(f"\n[MONITOR] Checking task status...")
     print(f"[URL] {status_url}")
     
@@ -129,11 +97,11 @@ def test_and_download_trace():
                 if current_status != last_status:
                     print(f"\n[STATUS] {current_status.upper()}")
                     
-                    # Show queue/browser info if available
+                    # Show queue info if available
                     if status.get('queue_position'):
                         print(f"[QUEUE] Position: {status['queue_position']}")
-                    if 'active_browsers' in status:
-                        print(f"[BROWSERS] Active: {status['active_browsers']}")
+                    if status.get('active_workers') is not None:
+                        print(f"[WORKERS] Active: {status['active_workers']}")
                     
                     last_status = current_status
                 
@@ -143,8 +111,27 @@ def test_and_download_trace():
                     print(f"[SUCCESS] Task completed successfully!")
                     print(f"{'=' * 80}")
                     
-                    # Download trace
-                    download_trace(task_id)
+                    # Show trace info
+                    trace_url = f"{TRACE_URL_BASE}/{task_id}"
+                    print(f"\n[TRACE] Download trace file:")
+                    print(f"        {trace_url}")
+                    print(f"        Or: curl -O {trace_url}")
+                    
+                    # Try to download trace
+                    try:
+                        print(f"\n[DOWNLOAD] Attempting to download trace...")
+                        trace_response = requests.get(trace_url, timeout=10)
+                        if trace_response.status_code == 200:
+                            trace_path = TRACES_DIR / f"{task_id}.zip"
+                            trace_path.parent.mkdir(exist_ok=True)
+                            trace_path.write_bytes(trace_response.content)
+                            print(f"[OK] Trace saved to: {trace_path}")
+                            print(f"[VIEW] Run: playwright show-trace {trace_path}")
+                        else:
+                            print(f"[INFO] Trace not available (status: {trace_response.status_code})")
+                    except Exception as e:
+                        print(f"[INFO] Could not download trace: {e}")
+                    
                     break
                     
                 elif current_status in ['failed', 'error']:
@@ -153,10 +140,6 @@ def test_and_download_trace():
                     print(f"{'=' * 80}")
                     if status.get('error'):
                         print(f"[ERROR] {status['error']}")
-                    
-                    # Still try to download trace for debugging
-                    print(f"\n[INFO] Attempting to download trace for debugging...")
-                    download_trace(task_id)
                     break
                     
             elif response.status_code == 404:
@@ -173,8 +156,6 @@ def test_and_download_trace():
         print(f"\n[TIMEOUT] Task did not complete within {max_wait} seconds")
         print(f"[INFO] Task may still be running. Check status manually:")
         print(f"       {status_url}")
-        print(f"\n[INFO] You can try to download the trace manually:")
-        print(f"       python download_latest_trace.py {task_id}")
     
     print(f"\n{'=' * 80}")
     print("[DONE]")
@@ -182,19 +163,18 @@ def test_and_download_trace():
 
 
 def check_server_health():
-    """Check if the server is running"""
+    """Check if the webhook server is running"""
     try:
-        response = requests.get(f"{BASE_URL}/health", timeout=5)
+        response = requests.get("http://localhost:5000/health", timeout=5)
         if response.status_code == 200:
-            print(f"[OK] Server is running at {BASE_URL}")
+            print("[OK] Webhook server is running!")
             return True
         else:
             print(f"[WARNING] Server responded with status: {response.status_code}")
             return False
     except requests.exceptions.ConnectionError:
-        print(f"[ERROR] Could not connect to server!")
-        if USE_LOCAL:
-            print("[INFO] Start it with: python webhook_server.py")
+        print("[ERROR] Webhook server is not running!")
+        print("[INFO] Start it with: python webhook_server.py")
         return False
     except Exception as e:
         print(f"[ERROR] Could not check server health: {e}")
@@ -202,11 +182,13 @@ def check_server_health():
 
 
 if __name__ == "__main__":
-    print("\n[CHECK] Testing server health...")
+    print("\n[CHECK] Testing webhook server health...")
     if check_server_health():
         print("\n" + "=" * 80)
-        test_and_download_trace()
+        test_local_webhook()
     else:
-        print("\n[ABORT] Cannot proceed without server running")
+        print("\n[ABORT] Cannot proceed without webhook server running")
+        print("[INFO] Start the server in another terminal:")
+        print("       cd \"c:\\Users\\Dell\\Desktop\\RPA For a\\automation\"")
+        print("       python webhook_server.py")
         sys.exit(1)
-

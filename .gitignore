@@ -27,6 +27,9 @@ logs/
 debug/
 debug_screenshots/
 
+# Local test files (not needed in production)
+test_concurrency.py
+
 # Videos (keep directory structure but ignore video files)
 logs/videos/*.webm
 

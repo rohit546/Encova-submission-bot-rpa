@@ -6,12 +6,15 @@ import json
 import logging
 import threading
 import queue
-from datetime import datetime
+import time
+import shutil
+from datetime import datetime, timedelta
+from pathlib import Path
 from flask import Flask, request, jsonify, send_file, abort
 from flask_cors import CORS
 from encova_login import EncovaLogin
 from config import (
-    WEBHOOK_HOST, WEBHOOK_PORT, WEBHOOK_PATH, LOG_DIR, TRACE_DIR,
+    WEBHOOK_HOST, WEBHOOK_PORT, WEBHOOK_PATH, LOG_DIR, TRACE_DIR, SESSION_DIR,
     ENCOVA_USERNAME, ENCOVA_PASSWORD
 )
 
@@ -46,6 +49,20 @@ active_workers = 0  # Current number of running workers
 worker_lock = threading.Lock()  # Lock for thread-safe worker count
 queue_position = {}  # Track queue position for each task
 
+# Browser pool with locking for concurrency safety
+# Only ONE browser can use browser_data_default at a time
+browser_lock = threading.Lock()  # Lock for browser_data folder access
+browser_in_use = False  # Track if browser is currently in use
+
+# Cleanup scheduler configuration
+CLEANUP_INTERVAL_HOURS = 6  # Run cleanup every 6 hours
+CLEANUP_MAX_AGE_DAYS = 2  # Delete files older than 2 days
+MAX_TRACE_FILES = 5  # Keep only last 5 trace files
+
+# Cleanup scheduler thread
+cleanup_thread = None
+cleanup_stop_event = threading.Event()
+
 # Field mapping: Simple field names -> CSS selectors
 FIELD_MAPPING = {
     # Contact Information
@@ -53,7 +70,7 @@ FIELD_MAPPING = {
     "lastName": 'input[name="contactLastName"]',
     "companyName": 'input[id="inputCtrl0"]',
     "fein": 'input[id="inputCtrl1"]',
-    "description": 'input[ng-model="model.value"][ng-trim="true"]',
+    "description": 'input#inputCtrl2',  # Operations/Description - it's an input, not textarea
     
     # Address Information
     "addressLine1": 'input[ng-model="addressOwner.addressLine1.value"]',
@@ -171,11 +188,100 @@ def update_queue_positions():
                     del queue_position[task_id]
 
 
+def cleanup_old_files():
+    """
+    Cleanup old files to prevent disk space issues:
+    - Delete browser_data folders older than CLEANUP_MAX_AGE_DAYS
+    - Keep only MAX_TRACE_FILES most recent trace files
+    - Delete old log files older than CLEANUP_MAX_AGE_DAYS
+    - Delete all screenshot folders (screenshots are disabled)
+    """
+    logger.info("[CLEANUP] Starting scheduled cleanup...")
+    now = time.time()
+    max_age_seconds = CLEANUP_MAX_AGE_DAYS * 24 * 60 * 60
+    deleted_count = 0
+    
+    try:
+        # 1. Cleanup old browser_data folders (except browser_data_default)
+        logger.info("[CLEANUP] Cleaning up old browser_data folders...")
+        for folder in SESSION_DIR.glob("browser_data_*"):
+            if folder.name == "browser_data_default":
+                continue  # Keep the default browser data folder
+            try:
+                folder_age = now - folder.stat().st_mtime
+                if folder_age > max_age_seconds:
+                    shutil.rmtree(folder)
+                    deleted_count += 1
+                    logger.info(f"[CLEANUP] Deleted old browser_data: {folder.name}")
+            except Exception as e:
+                logger.debug(f"[CLEANUP] Could not delete {folder}: {e}")
+        
+        # 2. Keep only last MAX_TRACE_FILES trace files
+        logger.info("[CLEANUP] Cleaning up old trace files...")
+        trace_files = sorted(TRACE_DIR.glob("*.zip"), key=lambda f: f.stat().st_mtime, reverse=True)
+        if len(trace_files) > MAX_TRACE_FILES:
+            for trace_file in trace_files[MAX_TRACE_FILES:]:
+                try:
+                    trace_file.unlink()
+                    deleted_count += 1
+                    logger.info(f"[CLEANUP] Deleted old trace: {trace_file.name}")
+                except Exception as e:
+                    logger.debug(f"[CLEANUP] Could not delete trace {trace_file}: {e}")
+        
+        # 3. Cleanup old log files
+        logger.info("[CLEANUP] Cleaning up old log files...")
+        for log_file in LOG_DIR.glob("*.log"):
+            try:
+                file_age = now - log_file.stat().st_mtime
+                if file_age > max_age_seconds:
+                    log_file.unlink()
+                    deleted_count += 1
+                    logger.info(f"[CLEANUP] Deleted old log: {log_file.name}")
+            except Exception as e:
+                logger.debug(f"[CLEANUP] Could not delete log {log_file}: {e}")
+        
+        # 4. Delete all screenshot folders (screenshots are disabled)
+        logger.info("[CLEANUP] Cleaning up screenshot folders...")
+        screenshots_dir = LOG_DIR / "screenshots"
+        if screenshots_dir.exists():
+            for folder in screenshots_dir.iterdir():
+                if folder.is_dir():
+                    try:
+                        shutil.rmtree(folder)
+                        deleted_count += 1
+                        logger.info(f"[CLEANUP] Deleted screenshot folder: {folder.name}")
+                    except Exception as e:
+                        logger.debug(f"[CLEANUP] Could not delete screenshot folder {folder}: {e}")
+        
+        logger.info(f"[CLEANUP] Cleanup completed. Deleted {deleted_count} items.")
+        
+    except Exception as e:
+        logger.error(f"[CLEANUP] Error during cleanup: {e}")
+
+
+def cleanup_scheduler():
+    """Background thread that runs cleanup periodically"""
+    logger.info(f"[CLEANUP] Scheduler started - will run every {CLEANUP_INTERVAL_HOURS} hours")
+    
+    while not cleanup_stop_event.is_set():
+        # Wait for interval (check stop event every minute)
+        for _ in range(CLEANUP_INTERVAL_HOURS * 60):
+            if cleanup_stop_event.is_set():
+                break
+            time.sleep(60)  # Sleep 1 minute at a time
+        
+        if not cleanup_stop_event.is_set():
+            cleanup_old_files()
+    
+    logger.info("[CLEANUP] Scheduler stopped")
+
+
 def worker_thread():
     """
-    Worker thread that processes tasks from the queue
+    Worker thread that processes tasks from the queue.
+    Uses browser_lock to ensure only ONE task uses browser_data_default at a time.
     """
-    global active_workers
+    global active_workers, browser_in_use
     
     while True:
         try:
@@ -183,13 +289,23 @@ def worker_thread():
             task = task_queue.get(timeout=1)
             task_id, data, credentials = task
             
-            # Increment active workers count
+            # Update status to "waiting_for_browser"
+            if task_id in active_sessions:
+                active_sessions[task_id]["status"] = "waiting_for_browser"
+                active_sessions[task_id]["picked_at"] = datetime.now().isoformat()
+            
+            # Acquire browser lock - only ONE browser at a time!
+            logger.info(f"[QUEUE] Task {task_id} waiting for browser lock...")
+            browser_lock.acquire()
+            browser_in_use = True
+            
+            # NOW increment active workers (only when we have the lock)
             with worker_lock:
                 active_workers += 1
-                logger.info(f"[QUEUE] Worker started. Active workers: {active_workers}/{MAX_WORKERS}")
+                logger.info(f"[QUEUE] Task {task_id} acquired browser lock. Active: {active_workers}/{MAX_WORKERS}")
             
             try:
-                # Update task status
+                # Update task status to running (we have the lock now)
                 if task_id in active_sessions:
                     active_sessions[task_id]["status"] = "running"
                     active_sessions[task_id]["queue_position"] = 0
@@ -199,7 +315,7 @@ def worker_thread():
                 if task_id in queue_position:
                     del queue_position[task_id]
                 
-                logger.info(f"[QUEUE] Processing task {task_id} (was in queue)")
+                logger.info(f"[QUEUE] Processing task {task_id}")
                 
                 # Run automation task
                 run_automation_task_sync(task_id, data, credentials)
@@ -210,7 +326,18 @@ def worker_thread():
                     active_sessions[task_id]["status"] = "error"
                     active_sessions[task_id]["error"] = str(e)
             finally:
-                # Decrement active workers count
+                # Decrement active workers count BEFORE releasing lock
+                with worker_lock:
+                    active_workers -= 1
+                    logger.info(f"[QUEUE] Task {task_id} finished. Active: {active_workers}/{MAX_WORKERS}")
+                
+                # Release browser lock
+                browser_in_use = False
+                browser_lock.release()
+                logger.info(f"[QUEUE] Task {task_id} released browser lock")
+                
+                # Mark task as done
+                task_queue.task_done()
                 with worker_lock:
                     active_workers -= 1
                     logger.info(f"[QUEUE] Worker finished. Active workers: {active_workers}/{MAX_WORKERS}")
@@ -447,102 +574,34 @@ async def run_automation_task(task_id: str, data: dict, credentials: dict):
         password = credentials.get('password')
         
         logger.info(f"[TASK {task_id}] Initializing browser...")
-        login_handler = EncovaLogin(username=username, password=password, task_id=task_id)
+        # Use "default" as task_id for browser_data directory to share cached Angular app
+        # This avoids cold cache issues where each task would need to reload Angular from scratch
+        # The task_id is still logged for tracking, but browser uses shared cache
+        login_handler = EncovaLogin(username=username, password=password, task_id="default")
         
-        # Perform login
-        logger.info(f"[TASK {task_id}] Attempting login...")
-        success = await login_handler.login()
+        # Run full automation with provided data
+        logger.info(f"[TASK {task_id}] Starting full automation...")
+        
+        # Extract data from payload (already mapped in webhook route)
+        form_data = data.get('form_data', {})
+        dropdowns = data.get('dropdowns', [])
+        save_form = data.get('save_form', True)
+        
+        logger.info(f"[TASK {task_id}] Form fields: {len(form_data)}, Dropdowns: {len(dropdowns)}")
+        
+        # Call the single automation method
+        success = await login_handler.run_full_automation(
+            form_data=form_data,
+            dropdowns=dropdowns,
+            save_form=save_form
+        )
         
         if success:
-            logger.info(f"[TASK {task_id}] Login successful!")
-            page = await login_handler.get_page()
+            logger.info(f"[TASK {task_id}] Automation completed successfully!")
             
-            # Navigate to form
-            logger.info(f"[TASK {task_id}] Navigating to form...")
-            await login_handler.navigate_to_new_quote_search()
-            
-            # Process the received data and fill form
-            logger.info(f"[TASK {task_id}] Processing form data...")
-            
-            filled_count = 0
-            
-            # Fill form if form_data is provided in the payload
-            address_validation_used = False
-            if 'form_data' in data and data.get('form_data'):
-                form_data = data.get('form_data', {})
-                logger.info(f"[TASK {task_id}] Filling {len(form_data)} form fields...")
-                
-                # Track if we fill address fields that trigger validation
-                address_line1_filled = False
-                zip_code_filled = False
-                
-                for field_selector, value in form_data.items():
-                    try:
-                        success = await login_handler._fill_field(field_selector, value)
-                        if success:
-                            filled_count += 1
-                            logger.info(f"[TASK {task_id}] Filled field: {field_selector}")
-                            
-                            # Check if we filled address fields
-                            if 'addressLine1' in field_selector or 'addressOwner.addressLine1' in field_selector:
-                                address_line1_filled = True
-                            if 'postalCode' in field_selector or 'zipCode' in field_selector or 'addressOwner.postalCode' in field_selector:
-                                zip_code_filled = True
-                            
-                            # If both address line 1 and zip code are filled, check for address validation popup
-                            if address_line1_filled and zip_code_filled and not address_validation_used:
-                                logger.info(f"[TASK {task_id}] Address fields filled - checking for Address Validation popup...")
-                                address_validation_used = await login_handler.click_use_recommended_address()
-                                if address_validation_used:
-                                    logger.info(f"[TASK {task_id}] Address Validation used - State will be auto-filled")
-                        else:
-                            logger.warning(f"[TASK {task_id}] Failed to fill field: {field_selector}")
-                    except Exception as e:
-                        logger.error(f"[TASK {task_id}] Error filling {field_selector}: {e}")
-                
-                logger.info(f"[TASK {task_id}] Filled {filled_count}/{len(form_data)} fields")
-            
-            # Handle dropdowns if provided
-            # Skip state dropdown if address validation was used (state is auto-filled)
-            if 'dropdowns' in data and data.get('dropdowns'):
-                dropdowns = data.get('dropdowns', [])
-                logger.info(f"[TASK {task_id}] Processing {len(dropdowns)} dropdowns...")
-                
-                for i, dropdown in enumerate(dropdowns):
-                    selector = dropdown.get('selector')
-                    value = dropdown.get('value')
-                    if selector and value:
-                        # Skip state dropdown (focusser-2) if address validation was used
-                        if address_validation_used and selector == 'focusser-2':
-                            logger.info(f"[TASK {task_id}] Skipping state dropdown (focusser-2) - auto-filled by Address Validation")
-                            continue
-                        
-                        try:
-                            await login_handler.select_dropdown(selector, value)
-                            logger.info(f"[TASK {task_id}] Filled dropdown {i+1}/{len(dropdowns)}: {selector} = {value}")
-                        except Exception as e:
-                            logger.error(f"[TASK {task_id}] Error filling dropdown {selector}: {e}")
-            
-            # Click save button if requested
-            if data.get('save_form', True):
-                logger.info(f"[TASK {task_id}] Clicking Save & Close button...")
-                save_success = await login_handler.click_save_and_close_button()
-                if save_success:
-                    logger.info(f"[TASK {task_id}] Form saved successfully!")
-                else:
-                    logger.warning(f"[TASK {task_id}] Failed to save form")
-            
-            # Get screenshot and trace info
-            screenshots = []
+            # Get trace path if tracing is enabled
             trace_path = None
             if login_handler:
-                try:
-                    screenshots = login_handler.list_screenshots()
-                    logger.info(f"[TASK {task_id}] Screenshots: {len(screenshots)} taken")
-                except Exception as e:
-                    logger.debug(f"[TASK {task_id}] Could not get screenshots: {e}")
-                
-                # Get trace path if tracing is enabled
                 try:
                     if hasattr(login_handler, 'trace_path') and login_handler.trace_path:
                         trace_path = str(login_handler.trace_path)
@@ -555,77 +614,49 @@ async def run_automation_task(task_id: str, data: dict, credentials: dict):
                 "login_handler": login_handler,
                 "task_id": task_id,
                 "completed_at": datetime.now().isoformat(),
-                "fields_filled": filled_count if 'form_data' in data else 0,
-                "screenshots": screenshots,
-                "screenshot_count": len(screenshots),
+                "fields_filled": len(form_data) if form_data else 0,
                 "trace_path": trace_path
             }
             logger.info(f"[TASK {task_id}] Task completed successfully!")
         else:
             logger.error(f"[TASK {task_id}] Login failed!")
             
-            # Get screenshot info even if login failed
-            screenshots = []
-            if login_handler:
-                try:
-                    screenshots = login_handler.list_screenshots()
-                    logger.info(f"[TASK {task_id}] Screenshots (login failed): {len(screenshots)} taken")
-                except Exception as e:
-                    logger.debug(f"[TASK {task_id}] Could not get screenshots: {e}")
-            
             active_sessions[task_id] = {
                 "status": "failed",
                 "error": "Login failed",
                 "task_id": task_id,
-                "failed_at": datetime.now().isoformat(),
-                "screenshots": screenshots,
-                "screenshot_count": len(screenshots)
+                "failed_at": datetime.now().isoformat()
             }
             
     except Exception as e:
         logger.error(f"[TASK {task_id}] Automation task error: {e}", exc_info=True)
-        
-        # Get screenshot info even if task failed
-        screenshots = []
-        if login_handler:
-            try:
-                screenshots = login_handler.list_screenshots()
-                logger.info(f"[TASK {task_id}] Screenshots (task failed): {len(screenshots)} taken")
-            except Exception as e:
-                logger.debug(f"[TASK {task_id}] Could not get screenshots: {e}")
         
         active_sessions[task_id] = {
             "status": "error",
             "error": str(e),
             "error_type": type(e).__name__,
             "task_id": task_id,
-            "failed_at": datetime.now().isoformat(),
-            "screenshots": screenshots,
-            "screenshot_count": len(screenshots)
+            "failed_at": datetime.now().isoformat()
         }
     finally:
-        # Close browser and update screenshot info
+        # Close browser and update trace info
         if login_handler:
             try:
                 logger.info(f"[TASK {task_id}] Closing browser...")
                 await login_handler.close()
                 logger.info(f"[TASK {task_id}] Browser closed")
                 
-                # Update screenshots and trace in active_sessions
+                # Update trace in active_sessions
                 try:
-                    screenshots = login_handler.list_screenshots()
                     trace_path = None
                     if hasattr(login_handler, 'trace_path') and login_handler.trace_path:
                         trace_path = str(login_handler.trace_path)
                     
-                    if task_id in active_sessions:
-                        active_sessions[task_id]["screenshots"] = screenshots
-                        active_sessions[task_id]["screenshot_count"] = len(screenshots)
-                        if trace_path:
-                            active_sessions[task_id]["trace_path"] = trace_path
-                        logger.info(f"[TASK {task_id}] Screenshots: {len(screenshots)}, Trace: {trace_path}")
+                    if task_id in active_sessions and trace_path:
+                        active_sessions[task_id]["trace_path"] = trace_path
+                        logger.info(f"[TASK {task_id}] Trace: {trace_path}")
                 except Exception as e:
-                    logger.debug(f"[TASK {task_id}] Could not update screenshots/trace: {e}")
+                    logger.debug(f"[TASK {task_id}] Could not update trace: {e}")
             except Exception as e:
                 logger.error(f"[TASK {task_id}] Error closing browser: {e}")
 
@@ -650,18 +681,6 @@ def get_task_status(task_id: str):
                 status['active_workers'] = active_workers
                 status['max_workers'] = MAX_WORKERS
                 status['estimated_wait_time'] = f"~{status.get('queue_position', 0) * 5} minutes"  # Rough estimate
-        
-        # Add screenshot URLs if screenshots exist
-        if status.get('screenshots'):
-            screenshot_urls = []
-            base_url = request.url_root.rstrip('/')
-            for screenshot in status.get('screenshots', []):
-                screenshot_urls.append({
-                    "name": screenshot.get('name'),
-                    "filename": screenshot.get('filename'),
-                    "url": f"{base_url}/screenshot/{task_id}/{screenshot.get('filename')}"
-                })
-            status['screenshot_urls'] = screenshot_urls
         
         logger.info(f"Task {task_id} status: {status.get('status')}")
         return jsonify(status), 200
@@ -716,40 +735,10 @@ def stop_task(task_id: str):
         }), 404
 
 
-@app.route('/screenshot/<task_id>/<filename>', methods=['GET'])
-def get_screenshot(task_id: str, filename: str):
-    """Download a specific screenshot for a task"""
-    try:
-        from pathlib import Path
-        screenshot_path = LOG_DIR / "screenshots" / task_id / filename
-        
-        if not screenshot_path.exists():
-            logger.warning(f"Screenshot not found: {task_id}/{filename}")
-            return jsonify({
-                "status": "not_found",
-                "message": f"Screenshot not found: {filename}"
-            }), 404
-        
-        logger.info(f"Serving screenshot: {screenshot_path}")
-        return send_file(
-            str(screenshot_path),
-            mimetype='image/png',
-            as_attachment=True,
-            download_name=filename
-        )
-    except Exception as e:
-        logger.error(f"Error serving screenshot {task_id}/{filename}: {e}", exc_info=True)
-        return jsonify({
-            "status": "error",
-            "message": str(e)
-        }), 500
-
-
 @app.route('/trace/<task_id>', methods=['GET'])
 def get_trace(task_id: str):
     """Download trace file for a specific task"""
     try:
-        from pathlib import Path
         trace_path = TRACE_DIR / f"{task_id}.zip"
         
         if not trace_path.exists():
@@ -774,42 +763,32 @@ def get_trace(task_id: str):
         }), 500
 
 
-@app.route('/screenshots/<task_id>', methods=['GET'])
-def list_task_screenshots(task_id: str):
-    """List all screenshots for a specific task"""
+@app.route('/traces', methods=['GET'])
+def list_traces():
+    """List all available trace files"""
     try:
-        from pathlib import Path
-        screenshot_dir = LOG_DIR / "screenshots" / task_id
-        
-        if not screenshot_dir.exists():
-            return jsonify({
-                "task_id": task_id,
-                "total": 0,
-                "screenshots": []
-            }), 200
-        
-        screenshots = []
-        for screenshot_file in sorted(screenshot_dir.glob("*.png")):
+        traces = []
+        for trace_file in sorted(TRACE_DIR.glob("*.zip"), key=lambda f: f.stat().st_mtime, reverse=True):
             try:
-                stat = screenshot_file.stat()
-                screenshots.append({
-                    "name": screenshot_file.stem,
-                    "filename": screenshot_file.name,
+                stat = trace_file.stat()
+                traces.append({
+                    "task_id": trace_file.stem,
+                    "filename": trace_file.name,
                     "size_bytes": stat.st_size,
                     "size_kb": round(stat.st_size / 1024, 2),
                     "created_at": datetime.fromtimestamp(stat.st_mtime).isoformat(),
-                    "url": f"/screenshot/{task_id}/{screenshot_file.name}"
+                    "url": f"/trace/{trace_file.stem}"
                 })
             except Exception as e:
-                logger.debug(f"Error getting info for {screenshot_file}: {e}")
+                logger.debug(f"Error getting info for {trace_file}: {e}")
         
         return jsonify({
-            "task_id": task_id,
-            "total": len(screenshots),
-            "screenshots": screenshots
+            "total": len(traces),
+            "max_traces": MAX_TRACE_FILES,
+            "traces": traces
         }), 200
     except Exception as e:
-        logger.error(f"Error listing screenshots for task {task_id}: {e}", exc_info=True)
+        logger.error(f"Error listing traces: {e}", exc_info=True)
         return jsonify({
             "status": "error",
             "message": str(e)
@@ -830,22 +809,28 @@ def queue_status():
         status_counts[status] = status_counts.get(status, 0) + 1
     
     return jsonify({
-        "active_workers": current_workers,
+        "browser_in_use": browser_in_use,
+        "active_browsers": current_workers,  # Should always be 0 or 1
         "max_workers": MAX_WORKERS,
         "queue_size": queue_size,
         "total_tasks": len(active_sessions),
         "status_breakdown": status_counts,
-        "available_workers": MAX_WORKERS - current_workers
+        "note": "active_browsers should be 0 or 1 (browser lock enforced)"
     }), 200
 
 
 # Initialize worker threads when module is imported (for gunicorn)
 def init_workers():
-    """Initialize worker threads for queue system"""
+    """Initialize worker threads for queue system and cleanup scheduler"""
+    global cleanup_thread
+    
     logger.info("=" * 80)
     logger.info("ENCOVA AUTOMATION WEBHOOK SERVER")
     logger.info("=" * 80)
-    logger.info(f"Queue System: {MAX_WORKERS} worker threads")
+    logger.info(f"Queue System: {MAX_WORKERS} worker threads (with browser locking)")
+    logger.info(f"Browser Lock: Only 1 browser instance at a time to prevent conflicts")
+    logger.info(f"Cleanup: Every {CLEANUP_INTERVAL_HOURS}h, delete files older than {CLEANUP_MAX_AGE_DAYS} days")
+    logger.info(f"Traces: Keep only last {MAX_TRACE_FILES} trace files")
     logger.info("Starting worker threads...")
     
     # Start worker threads
@@ -853,6 +838,15 @@ def init_workers():
         worker = threading.Thread(target=worker_thread, daemon=True, name=f"Worker-{i+1}")
         worker.start()
         logger.info(f"  Worker {i+1}/{MAX_WORKERS} started")
+    
+    # Start cleanup scheduler thread
+    cleanup_thread = threading.Thread(target=cleanup_scheduler, daemon=True, name="Cleanup-Scheduler")
+    cleanup_thread.start()
+    logger.info("  Cleanup scheduler started")
+    
+    # Run initial cleanup on startup
+    logger.info("  Running initial cleanup...")
+    cleanup_old_files()
     
     logger.info("=" * 80)
     logger.info("Server ready to accept requests from Next.js app...")

@@ -65,9 +65,6 @@ class EncovaLogin:
         self.playwright = None
         self.task_id = task_id or "default"
         self.cookies_file = SESSION_DIR / "encova_cookies.json"
-        # Screenshot directory
-        self.screenshot_dir = LOG_DIR / "screenshots" / self.task_id
-        self.screenshot_dir.mkdir(parents=True, exist_ok=True)
         # Trace file path
         self.trace_path = TRACE_DIR / f"{self.task_id}.zip" if ENABLE_TRACING else None
         
@@ -554,10 +551,9 @@ class EncovaLogin:
             try:
                 await self.page.goto(ENCOVA_LOGIN_URL, wait_until="load", timeout=TIMEOUT_PAGE)
                 await asyncio.sleep(1)  # Wait for page to render
-                await self.take_screenshot("03_1_after_goto")
+                logger.info("Navigation successful")
             except Exception as e:
                 logger.error(f"Navigation failed: {e}")
-                await self.take_screenshot("03_1_goto_failed", wait_for_content=False)
                 raise
             
             await asyncio.sleep(WAIT_OKTA_PROCESS)
@@ -692,88 +688,136 @@ class EncovaLogin:
             logger.info(f"Screenshot saved to {screenshot_path}")
             return False
     
-    async def take_screenshot(self, name: str, wait_for_content: bool = True) -> Path:
-        """Take a screenshot with debugging information"""
-        try:
-            # Get page state for debugging
-            try:
-                url = self.page.url
-                title = await self.page.title()
-                ready_state = await self.page.evaluate("document.readyState")
-                body_text = await self.page.evaluate("document.body ? document.body.innerText.substring(0, 200) : 'No body'")
-                has_content = len(body_text.strip()) > 0
-            except Exception as e:
-                url = "unknown"
-                title = "unknown"
-                ready_state = "unknown"
-                body_text = ""
-                has_content = False
-                logger.debug(f"Could not get page state: {e}")
-            
-            logger.info(f"Taking screenshot '{name}': URL={url}, Title={title}, ReadyState={ready_state}, HasContent={has_content}")
-            
-            # Wait a bit for content to render if needed
-            if wait_for_content and not has_content:
-                logger.info(f"Waiting for content before screenshot '{name}'...")
-                try:
-                    # Wait for body or some content
-                    await self.page.wait_for_load_state("domcontentloaded", timeout=5000)
-                    await asyncio.sleep(0.5)  # Small delay for rendering
-                except Exception:
-                    pass  # Continue even if wait times out
-            
-            screenshot_path = self.screenshot_dir / f"{name}.png"
-            await self.page.screenshot(path=str(screenshot_path), full_page=True)
-            
-            # Log additional debug info
-            file_size = screenshot_path.stat().st_size if screenshot_path.exists() else 0
-            logger.info(f"Screenshot saved: {screenshot_path} ({file_size} bytes) - URL: {url}")
-            
-            # If screenshot is suspiciously small (likely blank), log warning
-            if file_size < 5000:  # Very small file, likely blank
-                logger.warning(f"Screenshot '{name}' is very small ({file_size} bytes) - may be blank!")
-                logger.warning(f"  URL: {url}, ReadyState: {ready_state}, HasContent: {has_content}")
-            
-            return screenshot_path
-        except Exception as e:
-            logger.error(f"Error taking screenshot {name}: {e}", exc_info=True)
-            return None
-    
     async def login(self) -> bool:
-        """Main login method - handles both auto-login and first-time login"""
+        """
+        Main login method - handles both auto-login and first-time login
+        This ONLY handles authentication, does NOT navigate to forms or fill data
+        """
         try:
             await self.init_browser()
-            # Don't take screenshot immediately - page hasn't loaded yet
-            # await self.take_screenshot("01_browser_initialized", wait_for_content=False)
             await self.load_cookies()
             
             if await self.check_auto_login():
-                await self.take_screenshot("02_auto_login_success")
+                logger.info("Auto-login successful")
                 return True
             
             # perform_login will handle navigation, so we don't need to navigate here
-            # Just take a screenshot of the initial state
             try:
                 current_url = self.page.url
                 logger.info(f"Current page URL before login: {current_url}")
                 if current_url == "about:blank" or not current_url:
                     logger.info("Page is blank, will navigate in perform_login")
                 else:
-                    await self.take_screenshot("03_initial_state")
+                    logger.info("Page has content, proceeding with login")
             except Exception as e:
                 logger.debug(f"Could not get initial state: {e}")
             
             result = await self.perform_login()
             if result:
                 await asyncio.sleep(1)  # Wait for post-login page to load
-                await self.take_screenshot("04_after_login")
+                logger.info("Login successful")
             else:
-                await self.take_screenshot("04_login_failed")
+                logger.warning("Login failed")
             return result
             
         except Exception as e:
             logger.error(f"Login error: {e}")
-            await self.take_screenshot("error_login", wait_for_content=False)
+            return False
+    
+    async def run_full_automation(self, form_data: dict = None, dropdowns: list = None, save_form: bool = True) -> bool:
+        """
+        Complete automation flow: login + navigate + fill form + save
+        This is the main entry point that should be called by webhook
+        
+        Args:
+            form_data: Dictionary of field selectors and values
+            dropdowns: List of dropdown configs with selector and value
+            save_form: Whether to click Save & Close
+            
+        Returns:
+            bool: True if successful
+        """
+        try:
+            # Step 1: Login
+            logger.info("Step 1: Authenticating...")
+            if not await self.login():
+                logger.error("Authentication failed")
+                return False
+            logger.info("Authentication successful")
+            
+            # Step 2: Verify form is ready (login already navigated and opened form)
+            logger.info("Step 2: Verifying form is open...")
+            current_url = self.page.url
+            if "new-quote-account-search" not in current_url:
+                # Not on the right page - navigate there
+                if not await self.navigate_to_new_quote_search():
+                    logger.error("Navigation failed")
+                    return False
+            else:
+                # Already on the page - check if form is already open
+                form_visible = await self.page.query_selector('input[name="contactFirstName"]')
+                if not form_visible:
+                    logger.info("Form not open yet, opening it...")
+                    await self.click_create_new_account()
+                    await self.select_commercial_radio()
+                    await self.wait_for_form()
+                else:
+                    logger.info("Form already open, proceeding to fill...")
+            logger.info("Form ready for data entry")
+            
+            # Step 3: Select MIG radio button
+            logger.info("Step 3: Selecting MIG Customer (No)...")
+            await self.select_mig_radio_yes()
+            
+            # Step 4: Fill form fields (except zip code - fill last to trigger modal)
+            zip_selector = None
+            zip_value = None
+            if form_data:
+                logger.info(f"Step 4: Filling {len(form_data)} form fields...")
+                for field_selector, value in form_data.items():
+                    if value:
+                        # Save zip code for last - it triggers address validation modal
+                        if 'postalCode' in field_selector or 'zipCode' in field_selector.lower():
+                            zip_selector = field_selector
+                            zip_value = value
+                            continue
+                        await self._fill_field(field_selector, value)
+                        await asyncio.sleep(0.3)
+            
+            # Step 5: Fill zip code (triggers address validation modal)
+            if zip_selector and zip_value:
+                logger.info("Step 5: Filling zip code (triggers address validation)...")
+                await self._fill_field(zip_selector, zip_value)
+                await asyncio.sleep(0.5)
+                # Trigger blur to show modal
+                await self.page.keyboard.press('Tab')
+                await asyncio.sleep(2)  # Wait for modal to appear
+            
+            # Step 6: Address validation modal
+            logger.info("Step 6: Handling address validation modal...")
+            await self.click_use_recommended_address()
+            
+            # Step 7: Fill dropdowns
+            if dropdowns:
+                logger.info(f"Step 7: Filling {len(dropdowns)} dropdowns...")
+                for dropdown in dropdowns:
+                    selector = dropdown.get('selector')
+                    value = dropdown.get('value')
+                    if selector and value:
+                        # Use select_dropdown which routes to correct method (producer vs others)
+                        await self.select_dropdown(selector, value)
+                        await asyncio.sleep(0.5)
+            
+            # Step 8: Save form
+            if save_form:
+                logger.info("Step 8: Saving form...")
+                await self.click_save_and_close_button()
+            
+            logger.info("Full automation completed successfully!")
+            return True
+            
+        except Exception as e:
+            logger.error(f"Full automation error: {e}", exc_info=True)
             return False
     
     async def navigate_to_new_quote_search(self) -> bool:
@@ -1071,6 +1115,52 @@ class EncovaLogin:
             return False
         
         try:
+            # Special handling for description/operations field (inputCtrl2)
+            if 'inputCtrl2' in field_selector or 'description' in field_selector.lower() or 'operation' in field_selector.lower():
+                logger.debug(f"Using description field specific handling for: {field_selector}")
+                try:
+                    # Try the input field directly
+                    desc_selectors = [
+                        'input#inputCtrl2',
+                        'input[id="inputCtrl2"]',
+                        field_selector,
+                    ]
+                    
+                    for selector in desc_selectors:
+                        try:
+                            desc_field = await self.page.wait_for_selector(selector, timeout=3000, state='visible')
+                            if desc_field:
+                                await desc_field.click()
+                                await asyncio.sleep(0.2)
+                                await desc_field.fill(str(value))
+                                await asyncio.sleep(0.2)
+                                logger.info(f"Successfully filled description field with selector: {selector}")
+                                return True
+                        except Exception as e:
+                            logger.debug(f"Description selector {selector} failed: {e}")
+                            continue
+                    
+                    # Try JavaScript as fallback
+                    escaped_value = str(value).replace("'", "\\'").replace("\\n", "\\\\n")
+                    filled = await self.page.evaluate(f'''
+                        () => {{
+                            const descField = document.getElementById('inputCtrl2');
+                            if (descField) {{
+                                descField.value = '{escaped_value}';
+                                descField.dispatchEvent(new Event('input', {{ bubbles: true }}));
+                                descField.dispatchEvent(new Event('change', {{ bubbles: true }}));
+                                descField.dispatchEvent(new Event('blur', {{ bubbles: true }}));
+                                return true;
+                            }}
+                            return false;
+                        }}
+                    ''')
+                    if filled:
+                        logger.info(f"Successfully filled description field via JavaScript")
+                        return True
+                except Exception as e:
+                    logger.debug(f"Description field handling failed: {e}")
+            
             # Try direct selector first with longer timeout for ID-based selectors
             timeout = TIMEOUT_LONG if 'id=' in field_selector or field_selector.startswith('#') else TIMEOUT_MEDIUM
             
@@ -1419,9 +1509,13 @@ class EncovaLogin:
             
             # Type and select
             logger.info(f"Typing '{value}' into search input...")
-            await search_input.click()
-            await asyncio.sleep(WAIT_SHORT)
-            await search_input.fill(value)
+            try:
+                # Try to focus and fill directly without click (click is timing out)
+                await search_input.focus()
+                await asyncio.sleep(WAIT_SHORT)
+            except:
+                pass
+            await search_input.fill(value, timeout=5000)
             await asyncio.sleep(WAIT_MEDIUM)
             await search_input.press('Enter')
             await asyncio.sleep(WAIT_MEDIUM)
@@ -1461,28 +1555,35 @@ class EncovaLogin:
             bool: True if successful
         """
         logger.info(f"Selecting dropdown {focusser_id} with value: {value}")
+        
+        # Use specific method for producer dropdown (it works differently)
+        if focusser_id == "focusser-1":
+            return await self.fill_producer_dropdown(value)
+        
         return await self._fill_searchable_dropdown(focusser_id, value)
     
-    async def fill_producer_dropdown(self, producer_code: str) -> bool:
+    async def fill_producer_dropdown(self, producer_value: str) -> bool:
         """
-        Fill the Producer dropdown (pure selection, not searchable)
+        Fill the Producer dropdown - searchable dropdown
         
         Args:
-            producer_code: Producer code to select (partial match)
+            producer_value: Producer name or code to search and select
         
         Returns:
             bool: True if successful
         """
-        if not producer_code:
-            logger.warning("Empty producer_code provided")
+        if not producer_value:
+            logger.warning("Empty producer_value provided")
             return False
         
         try:
+            logger.info(f"Filling Producer dropdown with: {producer_value}")
+            
             # Close any open dropdowns
             await self.page.keyboard.press('Escape')
             await asyncio.sleep(WAIT_MEDIUM)
             
-            # Find focusser
+            # Find focusser-1 (Producer)
             focusser = await self.page.wait_for_selector(
                 'input#focusser-1', timeout=TIMEOUT_LONG, state='visible'
             )
@@ -1491,52 +1592,94 @@ class EncovaLogin:
             await focusser.scroll_into_view_if_needed()
             await asyncio.sleep(WAIT_MEDIUM)
             
-            # Click toggle
+            # Click toggle to open dropdown
             if not await self._click_dropdown_toggle(focusser):
                 logger.error("Could not find or click toggle button for Producer")
                 return False
             
-            logger.info("Toggle button clicked, waiting for options list...")
+            logger.info("Toggle button clicked, waiting for search input...")
             await asyncio.sleep(WAIT_DROPDOWN_OPEN)
             
-            # Wait for options
-            await self.page.wait_for_selector(
-                'div.ui-select-choices-row', timeout=TIMEOUT_MEDIUM, state='visible'
-            )
-            logger.info("Dropdown options list appeared")
-            
+            # Find the visible search input (like other dropdowns)
             await asyncio.sleep(WAIT_MEDIUM)
+            all_search_inputs = await self.page.query_selector_all('input[ng-model="$select.search"]')
+            logger.debug(f"Found {len(all_search_inputs)} search inputs total")
             
-            # Get all option rows
-            option_rows = await self.page.query_selector_all('div.ui-select-choices-row')
-            logger.info(f"Found {len(option_rows)} producer options")
-            
-            # Find matching option
-            selected = False
-            for idx, row in enumerate(option_rows):
+            search_input = None
+            for inp in all_search_inputs:
                 try:
-                    text_content = await row.text_content()
-                    logger.debug(f"Option {idx}: {text_content}")
-                    
-                    if producer_code.lower() in text_content.lower():
-                        logger.info(f"Found matching producer option: {text_content}")
-                        await row.click()
-                        await asyncio.sleep(WAIT_MEDIUM)
-                        selected = True
-                        logger.info(f"Successfully selected Producer: {text_content}")
-                        break
+                    is_visible = await inp.is_visible()
+                    if is_visible:
+                        is_really_visible = await inp.evaluate('''
+                            (el) => {
+                                const style = window.getComputedStyle(el);
+                                return style.display !== 'none' && 
+                                       style.visibility !== 'hidden' && 
+                                       el.offsetParent !== null;
+                            }
+                        ''')
+                        if is_really_visible:
+                            search_input = inp
+                            input_id = await inp.get_attribute('id')
+                            logger.info(f"Found visible search input: {input_id}")
+                            break
                 except Exception as e:
-                    logger.error(f"Error checking option {idx}: {e}")
+                    logger.debug(f"Error checking input: {e}")
                     continue
             
-            if not selected:
-                logger.error(f"Could not find producer matching '{producer_code}'")
+            if search_input:
+                # Type the search value
+                logger.info(f"Typing '{producer_value}' into search input...")
+                try:
+                    await search_input.focus()
+                    await asyncio.sleep(WAIT_SHORT)
+                except:
+                    pass
+                await search_input.fill(producer_value, timeout=5000)
+                await asyncio.sleep(WAIT_MEDIUM)
+                
+                # Press Enter to select first matching result
+                await search_input.press('Enter')
+                await asyncio.sleep(WAIT_MEDIUM)
+                
+                logger.info(f"Successfully filled Producer dropdown with: {producer_value}")
+                return True
+            else:
+                # Fallback: try clicking on matching option row
+                logger.info("No search input found, trying to click option row...")
+                
+                # Wait for options
+                try:
+                    await self.page.wait_for_selector(
+                        'div.ui-select-choices-row', timeout=TIMEOUT_MEDIUM, state='visible'
+                    )
+                except:
+                    pass
+                
+                option_rows = await self.page.query_selector_all('div.ui-select-choices-row')
+                logger.info(f"Found {len(option_rows)} producer options")
+                
+                for idx, row in enumerate(option_rows):
+                    try:
+                        text_content = await row.text_content()
+                        logger.debug(f"Option {idx}: {text_content}")
+                        
+                        if producer_value.lower() in text_content.lower():
+                            logger.info(f"Found matching producer option: {text_content}")
+                            await row.click()
+                            await asyncio.sleep(WAIT_MEDIUM)
+                            logger.info(f"Successfully selected Producer: {text_content}")
+                            return True
+                    except Exception as e:
+                        logger.debug(f"Error checking option {idx}: {e}")
+                        continue
+                
+                logger.error(f"Could not find producer matching '{producer_value}'")
                 return False
-            
-            return True
             
         except Exception as e:
             logger.error(f"Error filling Producer dropdown: {e}", exc_info=True)
+            return False
             return False
     
     async def click_use_recommended_address(self) -> bool:
@@ -1548,113 +1691,97 @@ class EncovaLogin:
             bool: True if successful
         """
         try:
-            logger.info("Waiting for Address Validation modal...")
+            logger.info("Checking for Address Validation modal...")
             
-            # Wait for modal to appear
-            await asyncio.sleep(WAIT_MODAL_APPEAR)
+            # Wait and poll for modal to appear (it appears after zip code blur)
+            modal_visible = False
+            for attempt in range(10):  # Try for up to 5 seconds
+                modal_visible = await self.page.evaluate('''
+                    () => {
+                        // Look for the specific modal with nbs-modal-secondary class and address div
+                        const addressModal = document.querySelector('.nbs-modal-secondary #address, div#address');
+                        if (addressModal && addressModal.offsetParent !== null) {
+                            return true;
+                        }
+                        // Also check for modal with Address Validation in header
+                        const modalHeader = document.querySelector('.modal-header');
+                        if (modalHeader && modalHeader.offsetParent !== null) {
+                            const text = (modalHeader.textContent || '').toUpperCase();
+                            if (text.includes('ADDRESS')) {
+                                return true;
+                            }
+                        }
+                        // Check for Use Recommended button visibility
+                        const buttons = document.querySelectorAll('button.primary-btn');
+                        for (let btn of buttons) {
+                            if (btn.offsetParent !== null) {
+                                const text = (btn.textContent || '').toUpperCase();
+                                if (text.includes('USE RECOMMENDED')) {
+                                    return true;
+                                }
+                            }
+                        }
+                        return false;
+                    }
+                ''')
+                
+                if modal_visible:
+                    logger.info(f"Address Validation modal detected (attempt {attempt + 1})")
+                    break
+                    
+                await asyncio.sleep(0.5)
             
-            # Check if modal exists
-            modal_selectors = [
-                '[class*="modal"][class*="address"]',
-                '[class*="popup"][class*="address"]',
-                'div[class*="address-validation"]',
-                '.modal:has-text("Address Validation")',
-            ]
+            if not modal_visible:
+                logger.info("Address Validation modal not visible after waiting, skipping...")
+                return True  # Not an error, modal just didn't appear
             
-            modal_found = False
-            for modal_selector in modal_selectors:
-                try:
-                    modal = await self.page.wait_for_selector(
-                        modal_selector, timeout=TIMEOUT_SHORT, state='visible'
-                    )
-                    if modal:
-                        modal_found = True
-                        logger.info(f"Found Address Validation modal with selector: {modal_selector}")
-                        break
-                except:
-                    continue
-            
-            # Try to find button in main page and iframes
+            # Click the Use Recommended button with correct selector
             selectors = [
-                'button.primary-btn.inline.medium.mr-0[ng-click*="recommendedAddresses"]',  # Exact selector from screenshot
-                'button.primary-btn[ng-click*="recommendedAddresses"]',
+                'button.primary-btn:has-text("Use Recommended")',
                 'button[ng-click*="recommendedAddresses"]',
                 'button:has-text("Use Recommended")',
-                'button:has-text("USE RECOMMENDED")',
-                'button.primary-btn:has-text("Recommended")',
-                'button[type="button"][ng-click*="select"]',
+                '.nbs-modal-secondary button.primary-btn',
+                '#address button.primary-btn',
+                'div.modal-footer button.primary-btn',
             ]
             
             clicked = False
-            
-            # First try in main page
             for selector in selectors:
                 try:
-                    logger.debug(f"Trying selector in main page: {selector}")
+                    logger.debug(f"Trying selector: {selector}")
                     button = await self.page.wait_for_selector(
-                        selector, timeout=TIMEOUT_MEDIUM, state='visible'
+                        selector, timeout=5000, state='visible'
                     )
                     
                     if button:
-                        text = await button.text_content()
-                        if text and 'recommend' in text.lower():
-                            await button.click()
-                            await asyncio.sleep(WAIT_LONG)
-                            clicked = True
-                            logger.info(f"Successfully clicked 'Use Recommended' button with selector: {selector}")
-                            break
+                        await button.click()
+                        await asyncio.sleep(WAIT_LONG)
+                        clicked = True
+                        logger.info(f"Successfully clicked 'Use Recommended' button with selector: {selector}")
+                        break
                 except Exception as e:
-                    logger.debug(f"Selector {selector} failed in main page: {e}")
+                    logger.debug(f"Selector {selector} failed: {e}")
                     continue
             
-            # If not found in main page, try iframes
-            if not clicked:
-                try:
-                    frames = self.page.frames
-                    for frame in frames:
-                        if frame != self.page.main_frame:
-                            for selector in selectors:
-                                try:
-                                    logger.debug(f"Trying selector in iframe {frame.url}: {selector}")
-                                    button = await frame.wait_for_selector(
-                                        selector, timeout=TIMEOUT_SHORT, state='visible'
-                                    )
-                                    if button:
-                                        text = await button.text_content()
-                                        if text and 'recommend' in text.lower():
-                                            await button.click()
-                                            await asyncio.sleep(WAIT_LONG)
-                                            clicked = True
-                                            logger.info(f"Successfully clicked 'Use Recommended' in iframe with selector: {selector}")
-                                            break
-                                except:
-                                    continue
-                            if clicked:
-                                break
-                except Exception as e:
-                    logger.debug(f"Error checking iframes: {e}")
-            
-            # JavaScript fallback
             if not clicked:
                 logger.info("Trying JavaScript approach for Use Recommended button...")
                 try:
                     clicked_js = await self.page.evaluate('''
                         () => {
-                            // Try exact selector first
-                            const exactBtn = document.querySelector('button.primary-btn.inline.medium.mr-0[ng-click*="recommendedAddresses"]');
-                            if (exactBtn) {
-                                exactBtn.click();
-                                return true;
-                            }
-                            
-                            // Fallback to text search
-                            const buttons = document.querySelectorAll('button');
+                            // Look for button with primary-btn class and Use Recommended text
+                            const buttons = document.querySelectorAll('button.primary-btn, button');
                             for (let btn of buttons) {
-                                const text = btn.textContent || btn.innerText;
-                                if (text && text.toLowerCase().includes('recommend')) {
+                                const text = (btn.textContent || btn.innerText || '').trim();
+                                if (text.toLowerCase().includes('use recommended')) {
                                     btn.click();
                                     return true;
                                 }
+                            }
+                            // Try ng-click attribute
+                            const ngButtons = document.querySelectorAll('button[ng-click*="recommendedAddresses"]');
+                            if (ngButtons.length > 0) {
+                                ngButtons[0].click();
+                                return true;
                             }
                             return false;
                         }
@@ -1669,8 +1796,6 @@ class EncovaLogin:
             
             if clicked:
                 logger.info("Successfully clicked 'Use Recommended' - City, County, State auto-filled")
-                # Wait a bit more for fields to auto-fill
-                await asyncio.sleep(WAIT_MEDIUM)
                 return True
             else:
                 logger.warning("Could not find or click 'Use Recommended' button - modal may not have appeared")
@@ -2114,23 +2239,6 @@ class EncovaLogin:
             logger.info("Browser closed and playwright stopped")
         except Exception as e:
             logger.error(f"Error closing browser: {e}")
-    
-    def get_screenshot_dir(self) -> Path:
-        """Get the directory containing screenshots for this task"""
-        return self.screenshot_dir
-    
-    def list_screenshots(self) -> list:
-        """List all screenshots for this task"""
-        screenshots = []
-        if self.screenshot_dir.exists():
-            for screenshot_file in sorted(self.screenshot_dir.glob("*.png")):
-                screenshots.append({
-                    "name": screenshot_file.stem,
-                    "filename": screenshot_file.name,
-                    "path": str(screenshot_file),
-                    "size_bytes": screenshot_file.stat().st_size
-                })
-        return screenshots
 
 
 async def main():
