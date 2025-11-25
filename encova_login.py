@@ -83,11 +83,12 @@ class EncovaLogin:
             logger.info(f"Remote debugging ENABLED - Port: {REMOTE_DEBUGGING_PORT}")
             logger.info(f"Browser will be accessible at: http://localhost:{REMOTE_DEBUGGING_PORT}")
             logger.info(f"Connect via Chrome: chrome://inspect")
-            logger.info(f"Railway proxy URL: maglev.proxy.rlwy.net:20292")
-            # Force headless=False when remote debugging is enabled
-            actual_headless = False
-            logger.info(f"Headless mode: {actual_headless} (forced False for remote debugging)")
-            logger.info(f"Waiting for browser to initialize... Tabs will appear after navigation to a page")
+            logger.info(f"Railway proxy URL: hopper.proxy.rlwy.net:19118")
+            # Keep headless=True in containers (Railway has no display)
+            # Remote debugging works perfectly with headless browsers!
+            actual_headless = True
+            logger.info(f"Headless mode: {actual_headless} (required for containerized environment)")
+            logger.info(f"Note: Remote debugging works with headless browsers - tabs will appear in chrome://inspect")
         else:
             logger.info("Remote debugging DISABLED")
             actual_headless = BROWSER_HEADLESS
