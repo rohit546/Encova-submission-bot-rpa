@@ -112,7 +112,11 @@ class EncovaLogin:
                 '--start-maximized',
             ] + (
                 # Add remote debugging if enabled
-                [f'--remote-debugging-port={REMOTE_DEBUGGING_PORT}'] if ENABLE_REMOTE_DEBUGGING else []
+                # Remote debugging works with headless browsers - Chrome DevTools Protocol supports it
+                [
+                    f'--remote-debugging-port={REMOTE_DEBUGGING_PORT}',
+                    '--remote-debugging-address=0.0.0.0',  # Allow external connections
+                ] if ENABLE_REMOTE_DEBUGGING else []
             ),
             # Add extra HTTP headers
             extra_http_headers={
