@@ -4,7 +4,7 @@
 This document chronicles the debugging journey of getting the Encova Submission Bot RPA to work correctly via the webhook server. The automation fills insurance forms on the Encova Edge portal.
 
 **Date:** November 26, 2025  
-**Project:** Carrier-Submission-Tracker-System-For-insurance-agency
+**Project:** Carrirer-Submission-Tracker-System-For-insurance-agency
 
 ---
 
