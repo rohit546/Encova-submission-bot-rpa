@@ -116,7 +116,8 @@ class EncovaLogin:
                 # Remote debugging works with headless browsers - Chrome DevTools Protocol supports it
                 [
                     f'--remote-debugging-port={REMOTE_DEBUGGING_PORT}',
-                    '--remote-debugging-address=0.0.0.0',  # Allow external connections
+                    '--remote-debugging-address=0.0.0.0',  # Allow external connections (required for Railway proxy)
+                    '--remote-allow-origins=*',  # Allow all origins to connect
                 ] if ENABLE_REMOTE_DEBUGGING else []
             ),
             # Add extra HTTP headers
@@ -137,8 +138,17 @@ class EncovaLogin:
             try:
                 logger.info("Navigating to about:blank to make browser visible in remote debugging...")
                 await self.page.goto("about:blank", wait_until="domcontentloaded", timeout=5000)
-                await asyncio.sleep(1)  # Wait a moment for remote debugging to register the page
-                logger.info("Browser page ready - should now be visible in chrome://inspect")
+                await asyncio.sleep(2)  # Wait for remote debugging to register the page
+                
+                # Get page info for debugging
+                try:
+                    url = self.page.url
+                    title = await self.page.title()
+                    logger.info(f"Browser page ready - URL: {url}, Title: {title}")
+                    logger.info(f"Browser should now be visible in chrome://inspect at hopper.proxy.rlwy.net:19118")
+                    logger.info(f"If tabs don't appear, try refreshing chrome://inspect or wait for navigation to a real page")
+                except Exception as e:
+                    logger.debug(f"Could not get page info: {e}")
             except Exception as e:
                 logger.warning(f"Could not navigate initial page for remote debugging: {e}")
         
