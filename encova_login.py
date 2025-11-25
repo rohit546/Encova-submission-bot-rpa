@@ -1550,9 +1550,34 @@ class EncovaLogin:
         try:
             logger.info("Waiting for Address Validation modal...")
             
+            # Wait for modal to appear
             await asyncio.sleep(WAIT_MODAL_APPEAR)
             
+            # Check if modal exists
+            modal_selectors = [
+                '[class*="modal"][class*="address"]',
+                '[class*="popup"][class*="address"]',
+                'div[class*="address-validation"]',
+                '.modal:has-text("Address Validation")',
+            ]
+            
+            modal_found = False
+            for modal_selector in modal_selectors:
+                try:
+                    modal = await self.page.wait_for_selector(
+                        modal_selector, timeout=TIMEOUT_SHORT, state='visible'
+                    )
+                    if modal:
+                        modal_found = True
+                        logger.info(f"Found Address Validation modal with selector: {modal_selector}")
+                        break
+                except:
+                    continue
+            
+            # Try to find button in main page and iframes
             selectors = [
+                'button.primary-btn.inline.medium.mr-0[ng-click*="recommendedAddresses"]',  # Exact selector from screenshot
+                'button.primary-btn[ng-click*="recommendedAddresses"]',
                 'button[ng-click*="recommendedAddresses"]',
                 'button:has-text("Use Recommended")',
                 'button:has-text("USE RECOMMENDED")',
@@ -1561,11 +1586,13 @@ class EncovaLogin:
             ]
             
             clicked = False
+            
+            # First try in main page
             for selector in selectors:
                 try:
-                    logger.debug(f"Trying selector: {selector}")
+                    logger.debug(f"Trying selector in main page: {selector}")
                     button = await self.page.wait_for_selector(
-                        selector, timeout=TIMEOUT_LONG, state='visible'
+                        selector, timeout=TIMEOUT_MEDIUM, state='visible'
                     )
                     
                     if button:
@@ -1577,14 +1604,50 @@ class EncovaLogin:
                             logger.info(f"Successfully clicked 'Use Recommended' button with selector: {selector}")
                             break
                 except Exception as e:
-                    logger.debug(f"Selector {selector} failed: {e}")
+                    logger.debug(f"Selector {selector} failed in main page: {e}")
                     continue
             
+            # If not found in main page, try iframes
+            if not clicked:
+                try:
+                    frames = self.page.frames
+                    for frame in frames:
+                        if frame != self.page.main_frame:
+                            for selector in selectors:
+                                try:
+                                    logger.debug(f"Trying selector in iframe {frame.url}: {selector}")
+                                    button = await frame.wait_for_selector(
+                                        selector, timeout=TIMEOUT_SHORT, state='visible'
+                                    )
+                                    if button:
+                                        text = await button.text_content()
+                                        if text and 'recommend' in text.lower():
+                                            await button.click()
+                                            await asyncio.sleep(WAIT_LONG)
+                                            clicked = True
+                                            logger.info(f"Successfully clicked 'Use Recommended' in iframe with selector: {selector}")
+                                            break
+                                except:
+                                    continue
+                            if clicked:
+                                break
+                except Exception as e:
+                    logger.debug(f"Error checking iframes: {e}")
+            
+            # JavaScript fallback
             if not clicked:
                 logger.info("Trying JavaScript approach for Use Recommended button...")
                 try:
                     clicked_js = await self.page.evaluate('''
                         () => {
+                            // Try exact selector first
+                            const exactBtn = document.querySelector('button.primary-btn.inline.medium.mr-0[ng-click*="recommendedAddresses"]');
+                            if (exactBtn) {
+                                exactBtn.click();
+                                return true;
+                            }
+                            
+                            // Fallback to text search
                             const buttons = document.querySelectorAll('button');
                             for (let btn of buttons) {
                                 const text = btn.textContent || btn.innerText;
@@ -1606,6 +1669,8 @@ class EncovaLogin:
             
             if clicked:
                 logger.info("Successfully clicked 'Use Recommended' - City, County, State auto-filled")
+                # Wait a bit more for fields to auto-fill
+                await asyncio.sleep(WAIT_MEDIUM)
                 return True
             else:
                 logger.warning("Could not find or click 'Use Recommended' button - modal may not have appeared")

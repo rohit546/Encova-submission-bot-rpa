@@ -467,9 +467,14 @@ async def run_automation_task(task_id: str, data: dict, credentials: dict):
             filled_count = 0
             
             # Fill form if form_data is provided in the payload
+            address_validation_used = False
             if 'form_data' in data and data.get('form_data'):
                 form_data = data.get('form_data', {})
                 logger.info(f"[TASK {task_id}] Filling {len(form_data)} form fields...")
+                
+                # Track if we fill address fields that trigger validation
+                address_line1_filled = False
+                zip_code_filled = False
                 
                 for field_selector, value in form_data.items():
                     try:
@@ -477,6 +482,19 @@ async def run_automation_task(task_id: str, data: dict, credentials: dict):
                         if success:
                             filled_count += 1
                             logger.info(f"[TASK {task_id}] Filled field: {field_selector}")
+                            
+                            # Check if we filled address fields
+                            if 'addressLine1' in field_selector or 'addressOwner.addressLine1' in field_selector:
+                                address_line1_filled = True
+                            if 'postalCode' in field_selector or 'zipCode' in field_selector or 'addressOwner.postalCode' in field_selector:
+                                zip_code_filled = True
+                            
+                            # If both address line 1 and zip code are filled, check for address validation popup
+                            if address_line1_filled and zip_code_filled and not address_validation_used:
+                                logger.info(f"[TASK {task_id}] Address fields filled - checking for Address Validation popup...")
+                                address_validation_used = await login_handler.click_use_recommended_address()
+                                if address_validation_used:
+                                    logger.info(f"[TASK {task_id}] Address Validation used - State will be auto-filled")
                         else:
                             logger.warning(f"[TASK {task_id}] Failed to fill field: {field_selector}")
                     except Exception as e:
