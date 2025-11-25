@@ -33,8 +33,8 @@ from config import (
     TIMEOUT_LOGIN,
     TIMEOUT_WIDGET,
     TIMEOUT_PAGE,
-    REMOTE_DEBUGGING_PORT,
-    ENABLE_REMOTE_DEBUGGING,
+    ENABLE_TRACING,
+    TRACE_DIR,
 )
 
 # Setup logging
@@ -68,6 +68,8 @@ class EncovaLogin:
         # Screenshot directory
         self.screenshot_dir = LOG_DIR / "screenshots" / self.task_id
         self.screenshot_dir.mkdir(parents=True, exist_ok=True)
+        # Trace file path
+        self.trace_path = TRACE_DIR / f"{self.task_id}.zip" if ENABLE_TRACING else None
         
     async def init_browser(self) -> None:
         """Initialize browser with persistent context for cookie storage"""
@@ -78,20 +80,15 @@ class EncovaLogin:
         user_data_dir = SESSION_DIR / f"browser_data_{self.task_id}"
         user_data_dir.mkdir(parents=True, exist_ok=True)
         
-        # Log remote debugging status
-        if ENABLE_REMOTE_DEBUGGING:
-            logger.info(f"Remote debugging ENABLED - Port: {REMOTE_DEBUGGING_PORT}")
-            logger.info(f"Browser will be accessible at: http://localhost:{REMOTE_DEBUGGING_PORT}")
-            logger.info(f"Connect via Chrome: chrome://inspect")
-            logger.info(f"Railway proxy URL: hopper.proxy.rlwy.net:19118")
-            # Keep headless=True in containers (Railway has no display)
-            # Remote debugging works perfectly with headless browsers!
-            actual_headless = True
-            logger.info(f"Headless mode: {actual_headless} (required for containerized environment)")
-            logger.info(f"Note: Remote debugging works with headless browsers - tabs will appear in chrome://inspect")
+        # Log tracing status
+        if ENABLE_TRACING:
+            logger.info(f"Playwright tracing ENABLED")
+            logger.info(f"Trace will be saved to: {self.trace_path}")
+            logger.info(f"View trace with: playwright show-trace {self.trace_path}")
         else:
-            logger.info("Remote debugging DISABLED")
-            actual_headless = BROWSER_HEADLESS
+            logger.info("Playwright tracing DISABLED")
+        
+        actual_headless = BROWSER_HEADLESS
         
         # Use persistent context to save cookies with better fingerprinting evasion
         self.context = await self.playwright.chromium.launch_persistent_context(
@@ -111,15 +108,7 @@ class EncovaLogin:
                 '--disable-infobars',
                 '--window-size=1920,1080',
                 '--start-maximized',
-            ] + (
-                # Add remote debugging if enabled
-                # Remote debugging works with headless browsers - Chrome DevTools Protocol supports it
-                [
-                    f'--remote-debugging-port={REMOTE_DEBUGGING_PORT}',
-                    '--remote-debugging-address=0.0.0.0',  # Allow external connections (required for Railway proxy)
-                    '--remote-allow-origins=*',  # Allow all origins to connect
-                ] if ENABLE_REMOTE_DEBUGGING else []
-            ),
+            ],
             # Add extra HTTP headers
             extra_http_headers={
                 'Accept-Language': 'en-US,en;q=0.9',
@@ -130,27 +119,18 @@ class EncovaLogin:
             }
         )
         
+        # Start tracing if enabled
+        if ENABLE_TRACING and self.trace_path:
+            logger.info(f"Starting Playwright trace recording...")
+            await self.context.tracing.start(
+                screenshots=True,
+                snapshots=True,
+                sources=True
+            )
+            logger.info(f"Trace recording started - will save to: {self.trace_path}")
+        
         self.page = await self.context.new_page()
         self.page.set_default_timeout(BROWSER_TIMEOUT)
-        
-        # For remote debugging: Navigate to a page so tabs appear in chrome://inspect
-        if ENABLE_REMOTE_DEBUGGING:
-            try:
-                logger.info("Navigating to about:blank to make browser visible in remote debugging...")
-                await self.page.goto("about:blank", wait_until="domcontentloaded", timeout=5000)
-                await asyncio.sleep(2)  # Wait for remote debugging to register the page
-                
-                # Get page info for debugging
-                try:
-                    url = self.page.url
-                    title = await self.page.title()
-                    logger.info(f"Browser page ready - URL: {url}, Title: {title}")
-                    logger.info(f"Browser should now be visible in chrome://inspect at hopper.proxy.rlwy.net:19118")
-                    logger.info(f"If tabs don't appear, try refreshing chrome://inspect or wait for navigation to a real page")
-                except Exception as e:
-                    logger.debug(f"Could not get page info: {e}")
-            except Exception as e:
-                logger.warning(f"Could not navigate initial page for remote debugging: {e}")
         
         # Comprehensive anti-detection script to prevent Okta from blocking
         await self.page.add_init_script("""

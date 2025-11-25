@@ -30,17 +30,10 @@ BROWSER_HEADLESS = os.getenv("BROWSER_HEADLESS", "True").lower() == "true"
 BROWSER_TIMEOUT = int(os.getenv("BROWSER_TIMEOUT", "30000"))  # milliseconds
 BROWSER_USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
 
-# Remote Debugging Configuration
-REMOTE_DEBUGGING_PORT = int(os.getenv("REMOTE_DEBUGGING_PORT", "9222"))
-ENABLE_REMOTE_DEBUGGING = os.getenv("ENABLE_REMOTE_DEBUGGING", "False").lower() == "true"
-
-# When remote debugging is enabled, disable headless mode for better visibility
-# (headless browsers may not show tabs in remote debugging properly)
-if ENABLE_REMOTE_DEBUGGING and BROWSER_HEADLESS:
-    import logging
-    logger = logging.getLogger(__name__)
-    logger.warning("Remote debugging enabled - setting BROWSER_HEADLESS=False for better debugging visibility")
-    BROWSER_HEADLESS = False
+# Playwright Tracing Configuration
+ENABLE_TRACING = os.getenv("ENABLE_TRACING", "True").lower() == "true"
+TRACE_DIR = BASE_DIR / "traces"
+TRACE_DIR.mkdir(exist_ok=True)
 
 # Timing Constants (seconds)
 WAIT_SHORT = 0.3

@@ -508,14 +508,23 @@ async def run_automation_task(task_id: str, data: dict, credentials: dict):
                 else:
                     logger.warning(f"[TASK {task_id}] Failed to save form")
             
-            # Get screenshot info
+            # Get screenshot and trace info
             screenshots = []
+            trace_path = None
             if login_handler:
                 try:
                     screenshots = login_handler.list_screenshots()
                     logger.info(f"[TASK {task_id}] Screenshots: {len(screenshots)} taken")
                 except Exception as e:
                     logger.debug(f"[TASK {task_id}] Could not get screenshots: {e}")
+                
+                # Get trace path if tracing is enabled
+                try:
+                    if hasattr(login_handler, 'trace_path') and login_handler.trace_path:
+                        trace_path = str(login_handler.trace_path)
+                        logger.info(f"[TASK {task_id}] Trace file: {trace_path}")
+                except Exception as e:
+                    logger.debug(f"[TASK {task_id}] Could not get trace path: {e}")
             
             active_sessions[task_id] = {
                 "status": "completed",
@@ -524,7 +533,8 @@ async def run_automation_task(task_id: str, data: dict, credentials: dict):
                 "completed_at": datetime.now().isoformat(),
                 "fields_filled": filled_count if 'form_data' in data else 0,
                 "screenshots": screenshots,
-                "screenshot_count": len(screenshots)
+                "screenshot_count": len(screenshots),
+                "trace_path": trace_path
             }
             logger.info(f"[TASK {task_id}] Task completed successfully!")
         else:
@@ -577,15 +587,21 @@ async def run_automation_task(task_id: str, data: dict, credentials: dict):
                 await login_handler.close()
                 logger.info(f"[TASK {task_id}] Browser closed")
                 
-                # Update screenshots in active_sessions
+                # Update screenshots and trace in active_sessions
                 try:
                     screenshots = login_handler.list_screenshots()
+                    trace_path = None
+                    if hasattr(login_handler, 'trace_path') and login_handler.trace_path:
+                        trace_path = str(login_handler.trace_path)
+                    
                     if task_id in active_sessions:
                         active_sessions[task_id]["screenshots"] = screenshots
                         active_sessions[task_id]["screenshot_count"] = len(screenshots)
-                        logger.info(f"[TASK {task_id}] Screenshots updated: {len(screenshots)}")
+                        if trace_path:
+                            active_sessions[task_id]["trace_path"] = trace_path
+                        logger.info(f"[TASK {task_id}] Screenshots: {len(screenshots)}, Trace: {trace_path}")
                 except Exception as e:
-                    logger.debug(f"[TASK {task_id}] Could not update screenshots: {e}")
+                    logger.debug(f"[TASK {task_id}] Could not update screenshots/trace: {e}")
             except Exception as e:
                 logger.error(f"[TASK {task_id}] Error closing browser: {e}")
 
@@ -699,6 +715,35 @@ def get_screenshot(task_id: str, filename: str):
         )
     except Exception as e:
         logger.error(f"Error serving screenshot {task_id}/{filename}: {e}", exc_info=True)
+        return jsonify({
+            "status": "error",
+            "message": str(e)
+        }), 500
+
+
+@app.route('/trace/<task_id>', methods=['GET'])
+def get_trace(task_id: str):
+    """Download trace file for a specific task"""
+    try:
+        from pathlib import Path
+        trace_path = TRACE_DIR / f"{task_id}.zip"
+        
+        if not trace_path.exists():
+            logger.warning(f"Trace not found for task: {task_id}")
+            return jsonify({
+                "status": "not_found",
+                "message": f"Trace not found for task {task_id}"
+            }), 404
+        
+        logger.info(f"Serving trace for task {task_id}: {trace_path}")
+        return send_file(
+            str(trace_path),
+            mimetype='application/zip',
+            as_attachment=True,
+            download_name=f"{task_id}.zip"
+        )
+    except Exception as e:
+        logger.error(f"Error serving trace for task {task_id}: {e}", exc_info=True)
         return jsonify({
             "status": "error",
             "message": str(e)
