@@ -765,7 +765,7 @@ def get_trace(task_id: str):
 
 @app.route('/traces', methods=['GET'])
 def list_traces():
-    """List all available trace files"""
+    """List all available trace files - returns HTML UI or JSON"""
     try:
         traces = []
         for trace_file in sorted(TRACE_DIR.glob("*.zip"), key=lambda f: f.stat().st_mtime, reverse=True):
@@ -781,6 +781,24 @@ def list_traces():
                 })
             except Exception as e:
                 logger.debug(f"Error getting info for {trace_file}: {e}")
+        
+        # Return HTML if browser request, JSON otherwise
+        if 'text/html' in request.headers.get('Accept', ''):
+            html = '''<!DOCTYPE html>
+<html><head><title>Traces</title>
+<style>body{font-family:Arial;max-width:800px;margin:40px auto;padding:0 20px}
+h1{color:#333}table{width:100%;border-collapse:collapse}
+th,td{padding:10px;text-align:left;border-bottom:1px solid #ddd}
+a{color:#0066cc;text-decoration:none}a:hover{text-decoration:underline}
+.size{color:#666}</style></head>
+<body><h1>📁 Trace Files</h1>
+<p>Total: ''' + str(len(traces)) + ''' traces (max ''' + str(MAX_TRACE_FILES) + ''')</p>
+<table><tr><th>Task ID</th><th>Size</th><th>Created</th><th>Download</th></tr>'''
+            for t in traces:
+                html += f'''<tr><td>{t["task_id"]}</td><td class="size">{t["size_kb"]} KB</td>
+<td>{t["created_at"][:19]}</td><td><a href="{t["url"]}">⬇ Download</a></td></tr>'''
+            html += '</table></body></html>'
+            return html, 200, {'Content-Type': 'text/html'}
         
         return jsonify({
             "total": len(traces),
