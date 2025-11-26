@@ -288,7 +288,7 @@ def worker_thread():
         try:
             # Get task from queue (blocks until task available)
             task = task_queue.get(timeout=1)
-            task_id, data, credentials = task
+            task_id, data, credentials, trace_id = task
             
             # Update status to "waiting_for_browser"
             if task_id in active_sessions:
@@ -316,10 +316,10 @@ def worker_thread():
                 if task_id in queue_position:
                     del queue_position[task_id]
                 
-                logger.info(f"[QUEUE] Processing task {task_id}")
+                logger.info(f"[QUEUE] Processing task {task_id} (trace: {trace_id})")
                 
                 # Run automation task
-                run_automation_task_sync(task_id, data, credentials)
+                run_automation_task_sync(task_id, data, credentials, trace_id)
                 
             except Exception as e:
                 logger.error(f"[QUEUE] Error processing task {task_id}: {e}", exc_info=True)
@@ -462,6 +462,19 @@ def webhook_receiver():
             # Generate or use provided task_id
             task_id = payload.get('task_id') or f"task_{datetime.now().strftime('%Y%m%d_%H%M%S')}_{len(active_sessions)}"
             
+            # Extract company name for trace file naming (before mapping)
+            company_name = ""
+            if 'form_data' in data and data.get('form_data'):
+                company_name = data['form_data'].get('companyName', '')
+            
+            # Create trace_id with company name for easy identification
+            if company_name:
+                # Sanitize company name for filename (remove special chars, limit length)
+                safe_company = "".join(c if c.isalnum() else "_" for c in company_name)[:30]
+                trace_id = f"{safe_company}_{task_id}"
+            else:
+                trace_id = task_id
+            
             # Map simple field names to CSS selectors
             logger.info(f"Mapping form data from simple field names to CSS selectors...")
             if 'form_data' in data and data.get('form_data'):
@@ -499,11 +512,11 @@ def webhook_receiver():
             
             if current_workers < MAX_WORKERS:
                 # Can start immediately - add to queue (worker will pick it up)
-                task_queue.put((task_id, data, credentials))
+                task_queue.put((task_id, data, credentials, trace_id))
                 logger.info(f"Task {task_id} added to queue (will start immediately, {current_workers}/{MAX_WORKERS} workers active)")
             else:
                 # Need to wait in queue
-                task_queue.put((task_id, data, credentials))
+                task_queue.put((task_id, data, credentials, trace_id))
                 queue_position[task_id] = queue_size + 1
                 active_sessions[task_id]["queue_position"] = queue_size + 1
                 logger.info(f"Task {task_id} queued (position {queue_size + 1}). Active workers: {current_workers}/{MAX_WORKERS}")
@@ -539,7 +552,7 @@ def webhook_receiver():
         }), 500
 
 
-def run_automation_task_sync(task_id: str, data: dict, credentials: dict):
+def run_automation_task_sync(task_id: str, data: dict, credentials: dict, trace_id: str):
     """
     Run automation task synchronously in a thread
     """
@@ -548,16 +561,17 @@ def run_automation_task_sync(task_id: str, data: dict, credentials: dict):
     asyncio.set_event_loop(loop)
     
     try:
-        loop.run_until_complete(run_automation_task(task_id, data, credentials))
+        loop.run_until_complete(run_automation_task(task_id, data, credentials, trace_id))
     finally:
         loop.close()
 
 
-async def run_automation_task(task_id: str, data: dict, credentials: dict):
+async def run_automation_task(task_id: str, data: dict, credentials: dict, trace_id: str):
     """
     Run automation task asynchronously
     """
     logger.info(f"[TASK {task_id}] Starting automation task")
+    logger.info(f"[TASK {task_id}] Trace file will be: {trace_id}.zip")
     logger.info(f"[TASK {task_id}] Credentials provided: username={credentials.get('username', 'N/A')}")
     logger.info(f"[TASK {task_id}] Data received: {json.dumps(data, indent=2, default=str)}")
     
@@ -571,12 +585,12 @@ async def run_automation_task(task_id: str, data: dict, credentials: dict):
         logger.info(f"[TASK {task_id}] Initializing browser...")
         # Use "default" as task_id for browser_data directory to share cached Angular app
         # This avoids cold cache issues where each task would need to reload Angular from scratch
-        # Pass the actual task_id as trace_id so each task has its own trace file
+        # Pass the trace_id (includes company name) for trace file naming
         login_handler = EncovaLogin(
             username=username, 
             password=password, 
             task_id="default",  # Shared browser cache
-            trace_id=task_id    # Unique trace file per task
+            trace_id=trace_id   # Trace file with company name
         )
         
         # Run full automation with provided data
