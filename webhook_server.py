@@ -1,6 +1,6 @@
 """
 Webhook server to receive data from Next.js app and trigger Encova automation
-Version: 2.1.0 - Browser locking, cleanup scheduler, trace per task
+Version: 2.1.1 - Browser locking, cleanup scheduler, trace per task (rebuild)
 """
 import asyncio
 import json
