@@ -14,6 +14,7 @@ from pathlib import Path
 from flask import Flask, request, jsonify, send_file, abort
 from flask_cors import CORS
 from encova_login import EncovaLogin
+from encova_quote import EncovaQuote
 from config import (
     WEBHOOK_HOST, WEBHOOK_PORT, WEBHOOK_PATH, LOG_DIR, TRACE_DIR, SESSION_DIR,
     ENCOVA_USERNAME, ENCOVA_PASSWORD
@@ -167,6 +168,106 @@ def map_dropdowns(simple_dropdowns: dict) -> list:
             logger.warning(f"Unknown dropdown name '{dropdown_name}'")
     
     return mapped_dropdowns
+
+
+def process_quote_data(quote_data: dict) -> dict:
+    """
+    Process and transform quote data fields according to business logic
+    
+    Mappings:
+    1. dba -> dba (passthrough)
+    2. org_type -> org_type (LLC, Corporation, Joint Venture, etc.)
+    3. years_at_location -> Calculate year_business_started (current_year - years_at_location)
+    4. no_of_gallons_annual -> Map to class_code_13454_premops_annual
+    5. inside_sales -> Map to class_code_13673_premops_annual
+    6. construction_type -> construction_type (passthrough)
+    7. no_of_stories -> num_stories
+    8. square_footage -> square_footage (passthrough)
+    9. year_built -> If < 2006, add 10 years
+    10. limit_business_income -> business_income_limit
+    11. limit_personal_property -> personal_property_limit
+    """
+    from datetime import datetime
+    
+    processed_data = {}
+    current_year = datetime.now().year
+    
+    # 1. DBA - Direct mapping
+    if 'dba' in quote_data:
+        processed_data['dba'] = quote_data['dba']
+    
+    # 2. Organization Type - Direct mapping
+    if 'org_type' in quote_data:
+        processed_data['org_type'] = quote_data['org_type']
+    
+    # 3. Years at Location -> Calculate Year Business Started
+    if 'years_at_location' in quote_data:
+        try:
+            years_at_location = int(quote_data['years_at_location'])
+            year_business_started = current_year - years_at_location
+            processed_data['year_business_started'] = str(year_business_started)
+            logger.info(f"Calculated year_business_started: {current_year} - {years_at_location} = {year_business_started}")
+        except (ValueError, TypeError):
+            logger.warning(f"Invalid years_at_location value: {quote_data['years_at_location']}")
+    
+    # 4. No of Gallons Annual -> Class Code 13454 PremOps Annual
+    if 'no_of_gallons_annual' in quote_data:
+        processed_data['class_code_13454_premops_annual'] = quote_data['no_of_gallons_annual']
+        logger.info(f"Mapped no_of_gallons_annual to class_code_13454_premops_annual: {quote_data['no_of_gallons_annual']}")
+    
+    # 5. Inside Sales -> Class Code 13673 PremOps Annual
+    if 'inside_sales' in quote_data:
+        processed_data['class_code_13673_premops_annual'] = quote_data['inside_sales']
+        logger.info(f"Mapped inside_sales to class_code_13673_premops_annual: {quote_data['inside_sales']}")
+    
+    # 6. Construction Type - Direct mapping
+    if 'construction_type' in quote_data:
+        processed_data['construction_type'] = quote_data['construction_type']
+    
+    # 7. No of Stories -> num_stories
+    if 'no_of_stories' in quote_data:
+        processed_data['num_stories'] = quote_data['no_of_stories']
+    
+    # 8. Square Footage - Direct mapping
+    if 'square_footage' in quote_data:
+        processed_data['square_footage'] = quote_data['square_footage']
+    
+    # 9. Year Built -> If < 2006, add 10 years
+    if 'year_built' in quote_data:
+        try:
+            year_built = int(quote_data['year_built'])
+            if year_built < 2006:
+                adjusted_year = year_built + 10
+                processed_data['year_built'] = str(adjusted_year)
+                logger.info(f"Adjusted year_built: {year_built} -> {adjusted_year} (added 10 years because < 2006)")
+            else:
+                processed_data['year_built'] = str(year_built)
+        except (ValueError, TypeError):
+            logger.warning(f"Invalid year_built value: {quote_data['year_built']}")
+            processed_data['year_built'] = quote_data['year_built']
+    
+    # 10. Limit Business Income -> business_income_limit
+    if 'limit_business_income' in quote_data:
+        processed_data['business_income_limit'] = quote_data['limit_business_income']
+    
+    # 11. Limit Personal Property -> personal_property_limit
+    if 'limit_personal_property' in quote_data:
+        processed_data['personal_property_limit'] = quote_data['limit_personal_property']
+    
+    # 12. Building Description (if provided)
+    if 'building_description' in quote_data:
+        processed_data['building_description'] = quote_data['building_description']
+    
+    # 13-16. HARDCODED VALUES (always the same, not from input)
+    processed_data['personal_property_deductible'] = "5000"
+    processed_data['valuation'] = "Replacement Cost"
+    processed_data['coinsurance'] = "80%"
+    processed_data['building_class_code'] = "Convenience Food/Gasoline Stores"
+    
+    logger.info("Applied hardcoded values: deductible=5000, valuation=Replacement Cost, coinsurance=80%, building_class=Convenience Food/Gasoline Stores")
+    
+    logger.info(f"Processed quote_data: {len(quote_data)} fields -> {len(processed_data)} processed fields")
+    return processed_data
 
 
 def update_queue_positions():
@@ -603,15 +704,76 @@ async def run_automation_task(task_id: str, data: dict, credentials: dict, trace
         
         logger.info(f"[TASK {task_id}] Form fields: {len(form_data)}, Dropdowns: {len(dropdowns)}")
         
-        # Call the single automation method
-        success = await login_handler.run_full_automation(
+        # Call the single automation method - now returns a dict with detailed results
+        automation_result = await login_handler.run_full_automation(
             form_data=form_data,
             dropdowns=dropdowns,
             save_form=save_form
         )
         
+        # Extract result details
+        success = automation_result.get("success", False)
+        account_created = automation_result.get("account_created", False)
+        account_number = automation_result.get("account_number")
+        quote_url = automation_result.get("quote_url")
+        result_message = automation_result.get("message", "")
+        
+        # Quote automation result
+        quote_result = None
+        
         if success:
-            logger.info(f"[TASK {task_id}] Automation completed successfully!")
+            if account_created and account_number:
+                logger.info(f"[TASK {task_id}] 🎉 SUCCESS! New Account Created: {account_number}")
+                logger.info(f"[TASK {task_id}] 🔗 Quote URL: {quote_url}")
+                
+                # Run quote automation if account was created
+                run_quote = data.get('run_quote_automation', True)  # Default to True
+                if run_quote:
+                    logger.info(f"[TASK {task_id}] Starting quote automation for account {account_number}...")
+                    
+                    # Close login browser first
+                    try:
+                        await login_handler.close()
+                        logger.info(f"[TASK {task_id}] Login browser closed, starting quote automation...")
+                    except Exception as e:
+                        logger.warning(f"[TASK {task_id}] Error closing login browser: {e}")
+                    
+                    # Get quote data from payload or use defaults
+                    raw_quote_data = data.get('quote_data', {})
+                    
+                    # Process quote data with business logic transformations
+                    quote_data = process_quote_data(raw_quote_data)
+                    logger.info(f"[TASK {task_id}] Processed {len(raw_quote_data)} raw quote fields -> {len(quote_data)} processed fields")
+                    
+                    # Initialize quote handler with same browser data folder
+                    quote_handler = EncovaQuote(
+                        account_number=account_number,
+                        task_id="default",  # Use same browser data folder
+                        trace_id=f"quote_{trace_id}" if trace_id else f"quote_{account_number}"
+                    )
+                    
+                    try:
+                        quote_result = await quote_handler.run_quote_automation(quote_data=quote_data)
+                        
+                        if quote_result.get("success"):
+                            logger.info(f"[TASK {task_id}] ✅ Quote automation completed!")
+                            result_message = f"Account {account_number} created and quote automation completed"
+                        else:
+                            logger.warning(f"[TASK {task_id}] Quote automation issue: {quote_result.get('message')}")
+                            result_message = f"Account {account_number} created, quote automation: {quote_result.get('message')}"
+                    except Exception as e:
+                        logger.error(f"[TASK {task_id}] Quote automation error: {e}", exc_info=True)
+                        quote_result = {"success": False, "message": str(e)}
+                    finally:
+                        try:
+                            await quote_handler.close()
+                        except Exception as e:
+                            logger.warning(f"[TASK {task_id}] Error closing quote browser: {e}")
+                    
+                    # Set login_handler to None since we already closed it
+                    login_handler = None
+            else:
+                logger.info(f"[TASK {task_id}] Automation completed: {result_message}")
             
             # Get trace path if tracing is enabled
             trace_path = None
@@ -629,17 +791,25 @@ async def run_automation_task(task_id: str, data: dict, credentials: dict, trace
                 "task_id": task_id,
                 "completed_at": datetime.now().isoformat(),
                 "fields_filled": len(form_data) if form_data else 0,
-                "trace_path": trace_path
+                "trace_path": trace_path,
+                # New account result fields
+                "account_created": account_created,
+                "account_number": account_number,
+                "quote_url": quote_url,
+                "message": result_message,
+                # Quote automation result
+                "quote_automation": quote_result
             }
             logger.info(f"[TASK {task_id}] Task completed successfully!")
         else:
-            logger.error(f"[TASK {task_id}] Login failed!")
+            logger.error(f"[TASK {task_id}] Automation failed: {result_message}")
             
             active_sessions[task_id] = {
                 "status": "failed",
-                "error": "Login failed",
+                "error": result_message or "Automation failed",
                 "task_id": task_id,
-                "failed_at": datetime.now().isoformat()
+                "failed_at": datetime.now().isoformat(),
+                "message": result_message
             }
             
     except Exception as e:

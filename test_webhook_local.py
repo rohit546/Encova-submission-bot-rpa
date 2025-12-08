@@ -1,6 +1,34 @@
 """
 Test local webhook server - sends data to localhost:5000
 Run webhook_server.py first, then run this test
+
+NEW QUOTE DATA PROCESSING (process_quote_data function):
+================================================
+INPUT FIELDS (from request):
+1. dba -> dba (passthrough)
+2. org_type -> org_type (LLC, Corporation, Joint Venture, etc.)
+3. years_at_location -> Calculate year_business_started (2026 - years_at_location)
+4. no_of_gallons_annual -> Maps to class_code_13454_premops_annual
+5. inside_sales -> Maps to class_code_13673_premops_annual
+6. construction_type -> construction_type (passthrough)
+7. no_of_stories -> num_stories
+8. square_footage -> square_footage (passthrough)
+9. year_built -> If < 2006, add 10 years
+10. limit_business_income -> business_income_limit
+11. limit_personal_property -> personal_property_limit
+12. building_description -> building_description (passthrough)
+
+HARDCODED VALUES (always the same, NOT inputs):
+- building_class_code: "Convenience Food/Gasoline Stores"
+- personal_property_deductible: "5000"
+- valuation: "Replacement Cost"
+- coinsurance: "80%"
+
+TEST DATA TRANSFORMATIONS:
+- years_at_location: 8 -> year_business_started: 2018 (2026 - 8)
+- year_built: 2003 -> 2013 (added 10 years because < 2006)
+- no_of_gallons_annual: 500000 -> class_code_13454_premops_annual
+- inside_sales: 150000 -> class_code_13673_premops_annual
 """
 import requests
 import time
@@ -35,15 +63,15 @@ def test_local_webhook():
         "task_id": task_id,
         "data": {
             "form_data": {
-                "firstName": "Michael",
-                "lastName": "Johnson",
-                "companyName": "Rincon Business Solutions",
-                "fein": "98-7654321",
-                "description": "Retail store with customer service",
-                "addressLine1": "332 Saint Andrews Rd",
-                "zipCode": "31326",
-                "phone": "(912) 555-9876",
-                "email": "test.rincon@example.com"
+                "firstName": "Sarah",
+                "lastName": "Mitchell",
+                "companyName": "Cottage Walk Convenience LLC",
+                "fein": "58-3692147",
+                "description": "Convenience store with gas station and retail operations",
+                "addressLine1": "55 COTTAGE WALK NW",
+                "zipCode": "30121",
+                "phone": "(770) 555-8899",
+                "email": "sarah.mitchell@cottagewalk.com"
             },
             "dropdowns": {
                 "state": "GA",
@@ -51,14 +79,36 @@ def test_local_webhook():
                 "contactMethod": "Email",
                 "producer": "Shahnaz Sutar"  # Producer name
             },
-            "save_form": True
+            "save_form": True,
+            "run_quote_automation": True,  # Run quote automation after account creation
+            "quote_data": {
+                # INPUT FIELDS - will be processed by process_quote_data()
+                "dba": "Cottage Walk Convenience",
+                "org_type": "LLC",
+                "years_at_location": "6",  # Will calculate: 2026 - 6 = 2020
+                "no_of_gallons_annual": "450000",  # Maps to class_code_13454_premops_annual
+                "inside_sales": "175000",  # Maps to class_code_13673_premops_annual
+                "construction_type": "Masonry Non-Combustible",
+                "no_of_stories": "1",
+                "square_footage": "2800",
+                "year_built": "2004",  # < 2006, will be adjusted to 2014
+                "limit_business_income": "300000",
+                "limit_personal_property": "180000",
+                "building_description": "Convenience store with fuel sales and retail operations"
+                
+                # HARDCODED (not inputs, handled by process_quote_data):
+                # - building_class_code: "Convenience Food/Gasoline Stores"
+                # - personal_property_deductible: "5000"
+                # - valuation: "Replacement Cost"
+                # - coinsurance: "80%"
+            }
         }
     }
     
     print(f"\n[REQUEST] Sending to: {WEBHOOK_URL}")
     print(f"[TASK ID] {task_id}")
-    print(f"[DATA] Company: Rincon Business Solutions")
-    print(f"[DATA] Address: 332 Saint Andrews Rd, Rincon, GA 31326")
+    print(f"[DATA] Company: Cottage Walk Convenience LLC")
+    print(f"[DATA] Address: 55 COTTAGE WALK NW, CARTERSVILLE, GA 30121")
     
     try:
         response = requests.post(WEBHOOK_URL, json=payload, timeout=30)
@@ -110,6 +160,14 @@ def test_local_webhook():
                     print(f"\n{'=' * 80}")
                     print(f"[SUCCESS] Task completed successfully!")
                     print(f"{'=' * 80}")
+                    
+                    # Show account creation result
+                    if status.get('account_created'):
+                        print(f"\n🎉 NEW ACCOUNT CREATED!")
+                        print(f"   Account Number: {status.get('account_number')}")
+                        print(f"   Quote URL: {status.get('quote_url')}")
+                    elif status.get('message'):
+                        print(f"\n[RESULT] {status.get('message')}")
                     
                     # Show trace info
                     trace_url = f"{TRACE_URL_BASE}/{task_id}"

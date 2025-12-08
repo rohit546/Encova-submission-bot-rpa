@@ -5,6 +5,7 @@ Handles both first-time login and auto-login scenarios
 import asyncio
 import json
 import logging
+import time
 from pathlib import Path
 from playwright.async_api import async_playwright, BrowserContext, Page
 from config import (
@@ -734,7 +735,7 @@ class EncovaLogin:
             logger.error(f"Login error: {e}")
             return False
     
-    async def run_full_automation(self, form_data: dict = None, dropdowns: list = None, save_form: bool = True) -> bool:
+    async def run_full_automation(self, form_data: dict = None, dropdowns: list = None, save_form: bool = True) -> dict:
         """
         Complete automation flow: login + navigate + fill form + save
         This is the main entry point that should be called by webhook
@@ -745,14 +746,28 @@ class EncovaLogin:
             save_form: Whether to click Save & Close
             
         Returns:
-            bool: True if successful
+            dict: Result containing:
+                - success: bool - overall success status
+                - account_created: bool - whether a new account was created
+                - account_number: str - the Encova account number (if created)
+                - quote_url: str - the URL of the new quote page (if redirected)
+                - message: str - description of what happened
         """
+        result = {
+            "success": False,
+            "account_created": False,
+            "account_number": None,
+            "quote_url": None,
+            "message": ""
+        }
+        
         try:
             # Step 1: Login
             logger.info("Step 1: Authenticating...")
             if not await self.login():
                 logger.error("Authentication failed")
-                return False
+                result["message"] = "Authentication failed"
+                return result
             logger.info("Authentication successful")
             
             # Step 2: Verify form is ready (login already navigated and opened form)
@@ -762,7 +777,8 @@ class EncovaLogin:
                 # Not on the right page - navigate there
                 if not await self.navigate_to_new_quote_search():
                     logger.error("Navigation failed")
-                    return False
+                    result["message"] = "Navigation to quote search page failed"
+                    return result
             else:
                 # Already on the page - check if form is already open
                 form_visible = await self.page.query_selector('input[name="contactFirstName"]')
@@ -818,17 +834,33 @@ class EncovaLogin:
                         await self.select_dropdown(selector, value)
                         await asyncio.sleep(0.5)
             
-            # Step 8: Save form
+            # Step 8: Save form and capture result
             if save_form:
                 logger.info("Step 8: Saving form...")
-                await self.click_save_and_close_button()
+                save_result = await self.click_save_and_close_button()
+                
+                # Merge save result into our result
+                result["success"] = save_result.get("success", False)
+                result["account_created"] = save_result.get("account_created", False)
+                result["account_number"] = save_result.get("account_number")
+                result["quote_url"] = save_result.get("quote_url")
+                result["message"] = save_result.get("message", "")
+                
+                if result["account_created"]:
+                    logger.info(f"🎉 Full automation completed! New Account: {result['account_number']}")
+                else:
+                    logger.info(f"Full automation completed. {result['message']}")
+            else:
+                result["success"] = True
+                result["message"] = "Form filled successfully (save skipped)"
+                logger.info("Full automation completed (save skipped)")
             
-            logger.info("Full automation completed successfully!")
-            return True
+            return result
             
         except Exception as e:
             logger.error(f"Full automation error: {e}", exc_info=True)
-            return False
+            result["message"] = f"Automation error: {str(e)}"
+            return result
     
     async def navigate_to_new_quote_search(self) -> bool:
         """Navigate to new quote account search page and create new account"""
@@ -2006,13 +2038,33 @@ class EncovaLogin:
             logger.error(f"Error selecting MIG radio button: {e}", exc_info=True)
             return False
     
-    async def click_save_and_close_button(self) -> bool:
+    async def click_save_and_close_button(self) -> dict:
         """
         Click the 'Save & Close' button to save the form.
         The button might be hidden by Angular conditions, so we'll try multiple approaches.
+        
+        Returns:
+            dict: Result containing:
+                - success: bool - whether save was successful
+                - account_created: bool - whether a new account was created
+                - account_number: str - the Encova account number (if created)
+                - quote_url: str - the URL of the new quote page (if redirected)
+                - message: str - description of what happened
         """
+        result = {
+            "success": False,
+            "account_created": False,
+            "account_number": None,
+            "quote_url": None,
+            "message": ""
+        }
+        
         try:
             logger.info("Looking for 'Save & Close' button...")
+            
+            # Capture URL before clicking save
+            url_before_save = self.page.url
+            logger.info(f"URL before save: {url_before_save}")
             
             # Wait a bit for form to be ready and Angular to process
             await asyncio.sleep(WAIT_MEDIUM)
@@ -2194,32 +2246,223 @@ class EncovaLogin:
                     logger.warning(f"JavaScript approach failed: {e}")
             
             if button_clicked:
-                # Wait for save to complete
-                logger.info("Waiting for form to save...")
-                await asyncio.sleep(WAIT_LONG)
+                # Wait for save to complete and potential redirect
+                logger.info("Waiting for form to save and checking for redirect...")
                 
-                # Check if we navigated away or modal closed
+                # Wait longer and check periodically for redirect
+                max_wait = 15  # Maximum seconds to wait
+                check_interval = 1  # Check every second
+                account_number = None
+                redirect_url = None
+                
+                for i in range(max_wait):
+                    await asyncio.sleep(check_interval)
+                    current_url = self.page.url
+                    
+                    # Pattern: https://agent.encova.com/gpa/html/new-quote/ACCOUNT_NUMBER
+                    import re
+                    new_quote_pattern = r'https://agent\.encova\.com/gpa/html/new-quote/(\d+)'
+                    match = re.search(new_quote_pattern, current_url)
+                    
+                    if match:
+                        account_number = match.group(1)
+                        redirect_url = current_url
+                        logger.info(f"✅ Redirect detected at {i+1}s: Account Number {account_number}")
+                        break
+                    
+                    # Also check for account number on the page (success modal or display)
+                    try:
+                        account_info = await self.page.evaluate("""
+                            () => {
+                                // Look for account number in any text
+                                const bodyText = document.body.innerText || '';
+                                
+                                // Pattern: Account Number: XXXXXXX or Account: XXXXXXX or #XXXXXXX
+                                const patterns = [
+                                    /Account\\s*(?:Number|#)?[:\\s]*([0-9]{7,12})/i,
+                                    /Account[:\\s]+([0-9]{7,12})/i,
+                                    /(?:New|Created)\\s+Account[:\\s]*([0-9]{7,12})/i,
+                                    /4[0-9]{9}/  // Encova accounts start with 4
+                                ];
+                                
+                                for (let pattern of patterns) {
+                                    const match = bodyText.match(pattern);
+                                    if (match) {
+                                        return match[1] || match[0];
+                                    }
+                                }
+                                
+                                // Check for success messages
+                                const successSelectors = [
+                                    '.success-message',
+                                    '.alert-success', 
+                                    '.toast-success',
+                                    '[class*="success"]'
+                                ];
+                                
+                                for (let selector of successSelectors) {
+                                    const el = document.querySelector(selector);
+                                    if (el && el.offsetParent !== null) {
+                                        const text = el.innerText || '';
+                                        const accMatch = text.match(/([0-9]{7,12})/);
+                                        if (accMatch) {
+                                            return accMatch[1];
+                                        }
+                                    }
+                                }
+                                
+                                return null;
+                            }
+                        """)
+                        
+                        if account_info:
+                            account_number = account_info
+                            redirect_url = current_url
+                            logger.info(f"✅ Account number found on page at {i+1}s: {account_number}")
+                            break
+                    except Exception as e:
+                        logger.debug(f"Page evaluation error: {e}")
+                    
+                    logger.debug(f"Waiting for redirect... ({i+1}/{max_wait}s) URL: {current_url}")
+                
+                # Take a screenshot for debugging
+                screenshot_path = LOG_DIR / "screenshots" / f"after_save_{int(time.time())}.png"
                 try:
-                    # Wait a bit to see if page changes
-                    await asyncio.sleep(WAIT_MEDIUM)
-                    logger.info("Save button clicked - form should be saved")
+                    await self.page.screenshot(path=str(screenshot_path), full_page=True)
+                    logger.info(f"Screenshot saved: {screenshot_path}")
                 except Exception as e:
-                    logger.debug(f"Post-save check: {e}")
+                    logger.debug(f"Could not save screenshot: {e}")
                 
-                return True
+                current_url = self.page.url
+                logger.info(f"URL after save wait: {current_url}")
+                
+                if account_number:
+                    logger.info(f"🎉 SUCCESS! New account created with Account Number: {account_number}")
+                    logger.info(f"🔗 Quote URL: {redirect_url or current_url}")
+                    
+                    result["success"] = True
+                    result["account_created"] = True
+                    result["account_number"] = account_number
+                    result["quote_url"] = redirect_url or current_url
+                    result["message"] = f"New account created successfully! Account Number: {account_number}"
+                    return result
+                else:
+                    # Check if we're still on the same page (account might already exist)
+                    if current_url == url_before_save or 'new-quote-account-search' in current_url:
+                        # Check for any error messages on the page
+                        error_message = await self._get_page_error_message()
+                        if error_message:
+                            logger.warning(f"⚠️ Save completed but account may already exist: {error_message}")
+                            result["success"] = True
+                            result["account_created"] = False
+                            result["message"] = f"Account may already exist: {error_message}"
+                        else:
+                            # Try one more time to find account number anywhere
+                            try:
+                                final_check = await self.page.evaluate("""
+                                    () => {
+                                        const bodyText = document.body.innerText || '';
+                                        const match = bodyText.match(/4[0-9]{9}/);
+                                        return match ? match[0] : null;
+                                    }
+                                """)
+                                if final_check:
+                                    logger.info(f"🎉 Found account number in final check: {final_check}")
+                                    result["success"] = True
+                                    result["account_created"] = True
+                                    result["account_number"] = final_check
+                                    result["quote_url"] = current_url
+                                    result["message"] = f"New account created! Account Number: {final_check}"
+                                    return result
+                            except:
+                                pass
+                            
+                            logger.info("Save clicked but no redirect detected - account may already exist")
+                            result["success"] = True
+                            result["account_created"] = False
+                            result["message"] = "Save completed but no new account created (may already exist)"
+                    else:
+                        # We're on a different page but not the expected new-quote page
+                        logger.info(f"Redirected to unexpected page: {current_url}")
+                        result["success"] = True
+                        result["account_created"] = False
+                        result["quote_url"] = current_url
+                        result["message"] = f"Save completed, redirected to: {current_url}"
+                    
+                    return result
             else:
                 logger.error("Could not find or click 'Save & Close' button")
+                result["message"] = "Could not find or click Save & Close button"
                 # Take screenshot for debugging
                 await self.page.screenshot(
                     path=str(LOG_DIR / 'save_button_not_found.png'), 
                     full_page=True
                 )
                 logger.info(f"Screenshot saved to {LOG_DIR / 'save_button_not_found.png'}")
-                return False
+                return result
                 
         except Exception as e:
             logger.error(f"Error clicking Save & Close button: {e}", exc_info=True)
-            return False
+            result["message"] = f"Error: {str(e)}"
+            return result
+    
+    async def _get_page_error_message(self) -> str:
+        """
+        Check for any error messages displayed on the page after save attempt.
+        
+        Returns:
+            str: Error message if found, empty string otherwise
+        """
+        try:
+            # Look for common error message containers
+            error_selectors = [
+                '.error-message',
+                '.alert-danger',
+                '.nbs-error',
+                '[ng-show*="error"]',
+                '.validation-error',
+                '.toast-error',
+                'div.error',
+                'span.error',
+            ]
+            
+            for selector in error_selectors:
+                try:
+                    error_el = await self.page.query_selector(selector)
+                    if error_el:
+                        is_visible = await error_el.is_visible()
+                        if is_visible:
+                            text = await error_el.inner_text()
+                            if text and text.strip():
+                                return text.strip()
+                except:
+                    continue
+            
+            # Also check for any visible toast/notification messages
+            try:
+                toast_text = await self.page.evaluate('''
+                    () => {
+                        const toasts = document.querySelectorAll('.toast, .notification, .alert');
+                        for (let toast of toasts) {
+                            if (toast.offsetParent !== null) {
+                                const text = toast.textContent || toast.innerText;
+                                if (text && text.trim()) {
+                                    return text.trim();
+                                }
+                            }
+                        }
+                        return '';
+                    }
+                ''')
+                if toast_text:
+                    return toast_text
+            except:
+                pass
+            
+            return ""
+        except Exception as e:
+            logger.debug(f"Error checking for error messages: {e}")
+            return ""
     
     async def get_page(self) -> Page:
         """Get the current page after login"""
