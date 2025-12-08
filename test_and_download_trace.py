@@ -24,25 +24,33 @@ else:
     BASE_URL = "https://encova-submission-bot-rpa-production.up.railway.app"
 
 WEBHOOK_URL = f"{BASE_URL}/webhook"
-TRACES_DIR = Path(__file__).parent / "debug" / "traces"
+# Save traces to the main traces directory (same as where Encova saves them)
+TRACES_DIR = Path(__file__).parent / "traces"
 TRACES_DIR.mkdir(parents=True, exist_ok=True)
 
 
-def download_trace(task_id: str) -> bool:
-    """Download trace file for a specific task"""
+def download_trace(task_id: str, trace_type: str = "") -> bool:
+    """
+    Download trace file for a specific task
+    Args:
+        task_id: Task identifier
+        trace_type: Optional prefix for trace file (e.g., "login", "quote")
+    """
     trace_url = f"{BASE_URL}/trace/{task_id}"
-    print(f"\n[DOWNLOAD] Fetching trace from: {trace_url}")
+    print(f"\n[DOWNLOAD] Fetching {trace_type} trace from: {trace_url}")
     
     try:
         response = requests.get(trace_url, timeout=30)
         if response.status_code == 200:
-            trace_path = TRACES_DIR / f"{task_id}.zip"
+            # Save with descriptive name
+            filename = f"{trace_type}_{task_id}.zip" if trace_type else f"{task_id}.zip"
+            trace_path = TRACES_DIR / filename
             trace_path.write_bytes(response.content)
-            print(f"[OK] Trace saved to: {trace_path}")
+            print(f"[OK] {trace_type.capitalize()} trace saved to: {trace_path}")
             print(f"[VIEW] Run: playwright show-trace {trace_path}")
             return True
         elif response.status_code == 404:
-            print(f"[INFO] Trace not found for task {task_id}")
+            print(f"[INFO] {trace_type.capitalize()} trace not found for task {task_id}")
             return False
         else:
             print(f"[ERROR] Server returned: {response.status_code}")
@@ -50,6 +58,32 @@ def download_trace(task_id: str) -> bool:
     except Exception as e:
         print(f"[ERROR] Download failed: {e}")
         return False
+
+
+def download_both_traces(task_id: str) -> None:
+    """
+    Download both login and quote traces for a task
+    The server creates two trace files:
+    - {task_id}.zip (login automation)
+    - quote_{task_id}.zip (quote automation)
+    """
+    print(f"\n{'=' * 80}")
+    print("[DOWNLOADING TRACES]")
+    print(f"{'=' * 80}")
+    
+    # Download login trace
+    login_success = download_trace(task_id, "login")
+    
+    # Download quote trace (has "quote_" prefix)
+    quote_task_id = f"quote_{task_id}"
+    quote_success = download_trace(quote_task_id, "quote")
+    
+    if login_success and quote_success:
+        print(f"\n[SUCCESS] Both traces downloaded successfully!")
+    elif login_success or quote_success:
+        print(f"\n[PARTIAL] Some traces downloaded successfully")
+    else:
+        print(f"\n[WARNING] No traces were downloaded")
 
 
 def test_and_download_trace():
@@ -60,22 +94,22 @@ def test_and_download_trace():
     print(f"\n[SERVER] {BASE_URL}")
     print(f"[MODE] {'LOCAL' if USE_LOCAL else 'RAILWAY'}")
     
-    # Test data - same as test_webhook_local.py
+    # Test data - with new quote automation fields
     task_id = f"test_trace_{int(time.time())}"
     payload = {
         "action": "start_automation",
         "task_id": task_id,
         "data": {
             "form_data": {
-                "firstName": "Michael",
-                "lastName": "Johnson",
-                "companyName": "Rincon Business Solutions",
-                "fein": "98-7654321",
-                "description": "Retail store with customer service",
-                "addressLine1": "332 Saint Andrews Rd",
-                "zipCode": "31326",
-                "phone": "(912) 555-9876",
-                "email": "test.rincon@example.com"
+                "firstName": "Sarah",
+                "lastName": "Mitchell",
+                "companyName": "Cottage Walk Convenience LLC",
+                "fein": "58-3692147",
+                "description": "Convenience store with gas station and retail operations",
+                "addressLine1": "55 COTTAGE WALK NW",
+                "zipCode": "30121",
+                "phone": "(770) 555-8899",
+                "email": "sarah.mitchell@cottagewalk.com"
             },
             "dropdowns": {
                 "state": "GA",
@@ -83,14 +117,37 @@ def test_and_download_trace():
                 "contactMethod": "Email",
                 "producer": "Shahnaz Sutar"
             },
-            "save_form": True
+            "save_form": True,
+            "run_quote_automation": True,  # Run quote automation after account creation
+            "quote_data": {
+                # INPUT FIELDS - will be processed by process_quote_data()
+                "dba": "Cottage Walk Convenience",
+                "org_type": "LLC",
+                "years_at_location": "6",  # Will calculate: 2026 - 6 = 2020
+                "no_of_gallons_annual": "450000",  # Maps to class_code_13454_premops_annual
+                "inside_sales": "175000",  # Maps to class_code_13673_premops_annual
+                "construction_type": "Masonry Non-Combustible",
+                "no_of_stories": "1",
+                "square_footage": "2800",
+                "year_built": "2004",  # < 2006, will be adjusted to 2014
+                "limit_business_income": "300000",
+                "limit_personal_property": "180000",
+                "building_description": "Convenience store with fuel sales and retail operations"
+                
+                # HARDCODED (automatically added by webhook):
+                # - building_class_code: "Convenience Food/Gasoline Stores"
+                # - personal_property_deductible: "5000"
+                # - valuation: "Replacement Cost"
+                # - coinsurance: "80%"
+            }
         }
     }
     
     print(f"\n[REQUEST] Sending to: {WEBHOOK_URL}")
     print(f"[TASK ID] {task_id}")
-    print(f"[DATA] Company: Rincon Business Solutions")
-    print(f"[DATA] Address: 332 Saint Andrews Rd, Rincon, GA 31326")
+    print(f"[DATA] Company: Cottage Walk Convenience LLC")
+    print(f"[DATA] Address: 55 COTTAGE WALK NW, CARTERSVILLE, GA 30121")
+    print(f"[QUOTE] Running both login and quote automation")
     
     try:
         response = requests.post(WEBHOOK_URL, json=payload, timeout=30)
@@ -143,8 +200,24 @@ def test_and_download_trace():
                     print(f"[SUCCESS] Task completed successfully!")
                     print(f"{'=' * 80}")
                     
-                    # Download trace
-                    download_trace(task_id)
+                    # Show account creation result
+                    if status.get('account_created'):
+                        print(f"\n🎉 NEW ACCOUNT CREATED!")
+                        print(f"   Account Number: {status.get('account_number')}")
+                        print(f"   Quote URL: {status.get('quote_url')}")
+                    
+                    # Show quote automation result
+                    if status.get('quote_automation'):
+                        quote_result = status['quote_automation']
+                        if quote_result.get('success'):
+                            print(f"\n✅ QUOTE AUTOMATION COMPLETED!")
+                            print(f"   Message: {quote_result.get('message', 'Success')}")
+                        else:
+                            print(f"\n⚠️ QUOTE AUTOMATION ISSUE:")
+                            print(f"   Message: {quote_result.get('message', 'Unknown error')}")
+                    
+                    # Download both login and quote traces
+                    download_both_traces(task_id)
                     break
                     
                 elif current_status in ['failed', 'error']:
@@ -154,9 +227,9 @@ def test_and_download_trace():
                     if status.get('error'):
                         print(f"[ERROR] {status['error']}")
                     
-                    # Still try to download trace for debugging
-                    print(f"\n[INFO] Attempting to download trace for debugging...")
-                    download_trace(task_id)
+                    # Still try to download traces for debugging
+                    print(f"\n[INFO] Attempting to download traces for debugging...")
+                    download_both_traces(task_id)
                     break
                     
             elif response.status_code == 404:
