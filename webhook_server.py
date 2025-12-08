@@ -923,10 +923,22 @@ def stop_task(task_id: str):
 def get_trace(task_id: str):
     """Download trace file for a specific task"""
     try:
-        trace_path = TRACE_DIR / f"{task_id}.zip"
+        # Try multiple trace file patterns
+        trace_candidates = [
+            TRACE_DIR / f"{task_id}.zip",  # Exact task_id
+            *list(TRACE_DIR.glob(f"*{task_id}*.zip")),  # Any file containing task_id
+        ]
         
-        if not trace_path.exists():
+        # Find the first existing trace file
+        trace_path = None
+        for candidate in trace_candidates:
+            if candidate.exists() and candidate.is_file():
+                trace_path = candidate
+                break
+        
+        if not trace_path:
             logger.warning(f"Trace not found for task: {task_id}")
+            logger.info(f"Searched paths: {[str(p) for p in trace_candidates[:3]]}")
             return jsonify({
                 "status": "not_found",
                 "message": f"Trace not found for task {task_id}"
@@ -937,7 +949,7 @@ def get_trace(task_id: str):
             str(trace_path),
             mimetype='application/zip',
             as_attachment=True,
-            download_name=f"{task_id}.zip"
+            download_name=f"{trace_path.name}"
         )
     except Exception as e:
         logger.error(f"Error serving trace for task {task_id}: {e}", exc_info=True)

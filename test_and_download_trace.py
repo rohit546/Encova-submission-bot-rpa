@@ -101,15 +101,15 @@ def test_and_download_trace():
         "task_id": task_id,
         "data": {
             "form_data": {
-                "firstName": "Sarah",
-                "lastName": "Mitchell",
-                "companyName": "Cottage Walk Convenience LLC",
-                "fein": "58-3692147",
-                "description": "Convenience store with gas station and retail operations",
-                "addressLine1": "55 COTTAGE WALK NW",
-                "zipCode": "30121",
-                "phone": "(770) 555-8899",
-                "email": "sarah.mitchell@cottagewalk.com"
+                "firstName": "Marcus",
+                "lastName": "Johnson",
+                "companyName": "White Bluff Fuel & Mart LLC",
+                "fein": "47-2856391",
+                "description": "Gas station and convenience store with retail fuel operations",
+                "addressLine1": "12403 White Bluff Rd",
+                "zipCode": "31419",
+                "phone": "(912) 555-2234",
+                "email": "marcus.johnson@whitebluffmart.com"
             },
             "dropdowns": {
                 "state": "GA",
@@ -121,18 +121,18 @@ def test_and_download_trace():
             "run_quote_automation": True,  # Run quote automation after account creation
             "quote_data": {
                 # INPUT FIELDS - will be processed by process_quote_data()
-                "dba": "Cottage Walk Convenience",
+                "dba": "White Bluff Fuel & Mart",
                 "org_type": "LLC",
-                "years_at_location": "6",  # Will calculate: 2026 - 6 = 2020
-                "no_of_gallons_annual": "450000",  # Maps to class_code_13454_premops_annual
-                "inside_sales": "175000",  # Maps to class_code_13673_premops_annual
+                "years_at_location": "4",  # Will calculate: 2026 - 4 = 2022
+                "no_of_gallons_annual": "620000",  # Maps to class_code_13454_premops_annual
+                "inside_sales": "225000",  # Maps to class_code_13673_premops_annual
                 "construction_type": "Masonry Non-Combustible",
                 "no_of_stories": "1",
-                "square_footage": "2800",
-                "year_built": "2004",  # < 2006, will be adjusted to 2014
-                "limit_business_income": "300000",
-                "limit_personal_property": "180000",
-                "building_description": "Convenience store with fuel sales and retail operations"
+                "square_footage": "3200",
+                "year_built": "2005",  # < 2006, will be adjusted to 2015
+                "limit_business_income": "400000",
+                "limit_personal_property": "250000",
+                "building_description": "Modern gas station with convenience store and automotive services"
                 
                 # HARDCODED (automatically added by webhook):
                 # - building_class_code: "Convenience Food/Gasoline Stores"
@@ -145,8 +145,8 @@ def test_and_download_trace():
     
     print(f"\n[REQUEST] Sending to: {WEBHOOK_URL}")
     print(f"[TASK ID] {task_id}")
-    print(f"[DATA] Company: Cottage Walk Convenience LLC")
-    print(f"[DATA] Address: 55 COTTAGE WALK NW, CARTERSVILLE, GA 30121")
+    print(f"[DATA] Company: White Bluff Fuel & Mart LLC")
+    print(f"[DATA] Address: 12403 White Bluff Rd, Savannah, GA 31419")
     print(f"[QUOTE] Running both login and quote automation")
     
     try:

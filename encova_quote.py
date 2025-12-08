@@ -22,6 +22,7 @@ from config import (
     ENABLE_TRACING,
     TRACE_DIR,
     BROWSER_TIMEOUT,
+    BROWSER_HEADLESS,
 )
 
 # Setup logging
@@ -84,7 +85,7 @@ class EncovaQuote:
         # Use persistent context to reuse cookies
         self.context = await self.playwright.chromium.launch_persistent_context(
             user_data_dir=str(user_data_dir),
-            headless=False,  # Set to True for production
+            headless=BROWSER_HEADLESS,  # Use config setting (True for Railway)
             viewport={"width": 1920, "height": 1080},
             user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
             args=[
