@@ -259,7 +259,7 @@ def process_quote_data(quote_data: dict) -> dict:
         processed_data['building_description'] = quote_data['building_description']
     
     # 13-16. HARDCODED VALUES (always the same, not from input)
-    processed_data['personal_property_deductible'] = "5000"
+    processed_data['personal_property_deductible'] = "5,000"
     processed_data['valuation'] = "Replacement Cost"
     processed_data['coinsurance'] = "80%"
     processed_data['building_class_code'] = "Convenience Food/Gasoline Stores"
