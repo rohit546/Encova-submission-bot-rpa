@@ -1653,7 +1653,7 @@ class EncovaQuote:
                 return result
             
             # Step 8: Add DBA on BASIC POLICY INFORMATION page
-            dba_name = quote_data.get('dba_name', 'Mr Mukhi LLC')
+            dba_name = quote_data.get('dba', quote_data.get('dba_name', ''))
             logger.info(f"Step 8: Adding DBA: {dba_name}...")
             if not await self.add_dba(dba_name):
                 result["message"] = "Failed to add DBA"
