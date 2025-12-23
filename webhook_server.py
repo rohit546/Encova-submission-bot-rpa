@@ -13,11 +13,12 @@ from datetime import datetime, timedelta
 from pathlib import Path
 from flask import Flask, request, jsonify, send_file, abort
 from flask_cors import CORS
+import requests
 from encova_login import EncovaLogin
 from encova_quote import EncovaQuote
 from config import (
     WEBHOOK_HOST, WEBHOOK_PORT, WEBHOOK_PATH, LOG_DIR, TRACE_DIR, SESSION_DIR,
-    ENCOVA_USERNAME, ENCOVA_PASSWORD
+    ENCOVA_USERNAME, ENCOVA_PASSWORD, COVERSHEET_WEBHOOK_URL
 )
 
 # Setup logging with detailed format
@@ -64,6 +65,122 @@ MAX_TRACE_FILES = 5  # Keep only last 5 trace files
 # Cleanup scheduler thread
 cleanup_thread = None
 cleanup_stop_event = threading.Event()
+
+
+def extract_submission_id(task_id: str) -> str:
+    """
+    Extract submission_id from task_id
+    Format: encova_{submission_id}_{timestamp} or encova_{timestamp}
+    Returns submission_id if found, otherwise returns task_id
+    """
+    if not task_id:
+        return None
+    
+    # Try to extract submission_id from format: encova_{submission_id}_{timestamp}
+    parts = task_id.split('_')
+    if len(parts) >= 3:
+        # Format: encova_{submission_id}_{timestamp}
+        # Check if middle part looks like a UUID (has dashes) or is a valid submission ID
+        submission_id = parts[1]
+        # If it's a UUID format (has dashes), return it
+        if '-' in submission_id and len(submission_id) > 10:
+            return submission_id
+        # Otherwise, might be a different format, try to return it anyway
+        if len(submission_id) > 5:  # Reasonable length for submission ID
+            return submission_id
+    
+    # If format doesn't match, return task_id as fallback
+    return task_id
+
+
+def notify_coversheet_completion(task_id: str, submission_id: str = None, success: bool = True, 
+                                 result_data: dict = None, error: str = None, error_details: str = None, 
+                                 carrier: str = None):
+    """
+    Notify Coversheet when automation completes (success or failure)
+    
+    Args:
+        task_id: The task ID that was sent in the original request
+        submission_id: Extract from task_id if not provided
+        success: True if completed successfully, False if failed
+        result_data: Dict with policy_code, quote_url, message (if success)
+        error: Error message string (if failed)
+        error_details: Full error details/stack trace (if failed)
+        carrier: Carrier name ("encova" or "guard"). If not provided, extracts from task_id or active_sessions
+    """
+    try:
+        # Extract submission_id from task_id if not provided
+        if not submission_id:
+            submission_id = extract_submission_id(task_id)
+        
+        # Determine carrier if not provided
+        if not carrier:
+            # Try to get from active_sessions
+            if task_id in active_sessions:
+                carrier = active_sessions[task_id].get('carrier')
+            # If still not found, detect from task_id prefix
+            if not carrier:
+                if task_id.startswith('guard_'):
+                    carrier = 'guard'
+                elif task_id.startswith('encova_'):
+                    carrier = 'encova'
+                else:
+                    carrier = 'encova'  # Default to encova
+        
+        # Prepare payload
+        payload = {
+            "carrier": carrier,
+            "task_id": task_id,
+            "submission_id": submission_id or task_id,
+            "status": "completed" if success else "failed",
+            "completed_at": datetime.utcnow().isoformat() + "Z"
+        }
+        
+        if success and result_data:
+            payload["result"] = {
+                "policy_code": result_data.get("policy_code"),
+                "quote_url": result_data.get("quote_url"),
+                "message": result_data.get("message", "Automation completed successfully")
+            }
+        else:
+            payload["error"] = error or "Automation failed"
+            if error_details:
+                payload["error_details"] = error_details
+        
+        # Skip webhook if URL is not configured
+        if not COVERSHEET_WEBHOOK_URL or COVERSHEET_WEBHOOK_URL == '':
+            logger.info(f"[WEBHOOK] Skipping Coversheet notification - URL not configured")
+            return
+        
+        # Send webhook callback
+        logger.info(f"[WEBHOOK] Notifying Coversheet: {payload['status']} for task {task_id}")
+        logger.info(f"[WEBHOOK] URL: {COVERSHEET_WEBHOOK_URL}")
+        logger.info(f"[WEBHOOK] Payload: {json.dumps(payload, indent=2)}")
+        
+        response = requests.post(
+            COVERSHEET_WEBHOOK_URL,
+            json=payload,
+            headers={"Content-Type": "application/json"},
+            timeout=10
+        )
+        response.raise_for_status()
+        logger.info(f"[WEBHOOK] ✅ Successfully notified Coversheet: {payload['status']}")
+        logger.info(f"[WEBHOOK] Response: {response.status_code} - {response.text[:200]}")
+        
+    except requests.exceptions.HTTPError as e:
+        # More detailed error logging for HTTP errors
+        error_msg = f"HTTP {e.response.status_code}: {e.response.reason}"
+        if e.response.status_code == 404:
+            error_msg += f" - Endpoint not found. Please verify the URL: {COVERSHEET_WEBHOOK_URL}"
+            error_msg += f"\n[WEBHOOK] Response body: {e.response.text[:500]}"
+        logger.warning(f"[WEBHOOK] ⚠️ Failed to notify Coversheet: {error_msg}")
+        # Don't fail the automation if webhook fails - just log it
+    except requests.exceptions.RequestException as e:
+        logger.warning(f"[WEBHOOK] ⚠️ Failed to notify Coversheet: {e}")
+        # Don't fail the automation if webhook fails - just log it
+    except Exception as e:
+        logger.warning(f"[WEBHOOK] ⚠️ Error notifying Coversheet: {e}", exc_info=True)
+        # Don't fail the automation if webhook fails - just log it
 
 # Field mapping: Simple field names -> CSS selectors
 FIELD_MAPPING = {
@@ -382,6 +499,7 @@ def worker_thread():
     """
     Worker thread that processes tasks from the queue.
     Uses browser_lock to ensure only ONE task uses browser_data_default at a time.
+    Handles both Encova and Guard tasks.
     """
     global active_workers, browser_in_use
     
@@ -389,7 +507,18 @@ def worker_thread():
         try:
             # Get task from queue (blocks until task available)
             task = task_queue.get(timeout=1)
-            task_id, data, credentials, trace_id = task
+            
+            # Unpack task - handle both Encova and Guard formats
+            if task[0] == 'guard':
+                # Guard task: ('guard', task_id, policy_code, quote_data)
+                _, task_id, policy_code, quote_data = task
+                task_type = 'guard'
+                logger.info(f"[QUEUE] Got Guard task {task_id}")
+            else:
+                # Encova task: (task_id, data, credentials, trace_id)
+                task_id, data, credentials, trace_id = task
+                task_type = 'encova'
+                logger.info(f"[QUEUE] Got Encova task {task_id}")
             
             # Update status to "waiting_for_browser"
             if task_id in active_sessions:
@@ -417,10 +546,20 @@ def worker_thread():
                 if task_id in queue_position:
                     del queue_position[task_id]
                 
-                logger.info(f"[QUEUE] Processing task {task_id} (trace: {trace_id})")
+                logger.info(f"[QUEUE] Processing {task_type} task {task_id}")
                 
-                # Run automation task
-                run_automation_task_sync(task_id, data, credentials, trace_id)
+                # Run appropriate automation
+                if task_type == 'guard':
+                    # Run Guard automation
+                    loop = asyncio.new_event_loop()
+                    asyncio.set_event_loop(loop)
+                    try:
+                        loop.run_until_complete(run_guard_automation_task(task_id, policy_code, quote_data))
+                    finally:
+                        loop.close()
+                else:
+                    # Run Encova automation
+                    run_automation_task_sync(task_id, data, credentials, trace_id)
                 
             except Exception as e:
                 logger.error(f"[QUEUE] Error processing task {task_id}: {e}", exc_info=True)
@@ -561,7 +700,13 @@ def webhook_receiver():
         # Validate required fields
         if action == 'start_automation':
             # Generate or use provided task_id
-            task_id = payload.get('task_id') or f"task_{datetime.now().strftime('%Y%m%d_%H%M%S')}_{len(active_sessions)}"
+            # Generate task_id
+            # If submission_id is provided, use format: encova_{submission_id}_{timestamp}
+            submission_id = payload.get('submission_id')
+            if submission_id:
+                task_id = payload.get('task_id') or f"encova_{submission_id}_{int(datetime.now().timestamp())}"
+            else:
+                task_id = payload.get('task_id') or f"task_{datetime.now().strftime('%Y%m%d_%H%M%S')}_{len(active_sessions)}"
             
             # Extract company name for trace file naming (before mapping)
             company_name = ""
@@ -590,6 +735,8 @@ def webhook_receiver():
                 logger.info(f"Mapped {len(data['dropdowns'])} dropdowns")
             
             logger.info(f"Starting automation task: {task_id}")
+            if submission_id:
+                logger.info(f"Submission ID: {submission_id}")
             logger.info(f"Task data summary: form_fields={len(data.get('form_data', {}))}, dropdowns={len(data.get('dropdowns', []))}")
             
             # Check if we can start immediately or need to queue
@@ -601,6 +748,7 @@ def webhook_receiver():
             active_sessions[task_id] = {
                 "status": "queued" if current_workers >= MAX_WORKERS else "running",
                 "task_id": task_id,
+                "submission_id": submission_id,  # Store submission_id for webhook callback
                 "queued_at": datetime.now().isoformat(),
                 "data_received": {
                     "form_fields_count": len(data.get('form_data', {})),
@@ -801,6 +949,22 @@ async def run_automation_task(task_id: str, data: dict, credentials: dict, trace
                 "quote_automation": quote_result
             }
             logger.info(f"[TASK {task_id}] Task completed successfully!")
+            
+            # Notify Coversheet of successful completion
+            submission_id = None
+            if task_id in active_sessions:
+                submission_id = active_sessions[task_id].get('submission_id')
+            
+            notify_coversheet_completion(
+                task_id=task_id,
+                submission_id=submission_id,
+                success=True,
+                result_data={
+                    "policy_code": account_number,  # Encova uses account_number as policy_code
+                    "quote_url": quote_url,
+                    "message": result_message or "Encova automation completed successfully"
+                }
+            )
         else:
             logger.error(f"[TASK {task_id}] Automation failed: {result_message}")
             
@@ -812,16 +976,45 @@ async def run_automation_task(task_id: str, data: dict, credentials: dict, trace
                 "message": result_message
             }
             
+            # Notify Coversheet of failure
+            submission_id = None
+            if task_id in active_sessions:
+                submission_id = active_sessions[task_id].get('submission_id')
+            
+            notify_coversheet_completion(
+                task_id=task_id,
+                submission_id=submission_id,
+                success=False,
+                error=result_message or "Automation failed",
+                error_details=None
+            )
+            
     except Exception as e:
+        import traceback
+        error_details = traceback.format_exc()
+        error_message = str(e)
         logger.error(f"[TASK {task_id}] Automation task error: {e}", exc_info=True)
         
         active_sessions[task_id] = {
             "status": "error",
-            "error": str(e),
+            "error": error_message,
             "error_type": type(e).__name__,
             "task_id": task_id,
             "failed_at": datetime.now().isoformat()
         }
+        
+        # Notify Coversheet of error
+        submission_id = None
+        if task_id in active_sessions:
+            submission_id = active_sessions[task_id].get('submission_id')
+        
+        notify_coversheet_completion(
+            task_id=task_id,
+            submission_id=submission_id,
+            success=False,
+            error=error_message,
+            error_details=error_details
+        )
     finally:
         # Close browser and update trace info
         if login_handler:
@@ -843,6 +1036,240 @@ async def run_automation_task(task_id: str, data: dict, credentials: dict, trace
                     logger.debug(f"[TASK {task_id}] Could not update trace: {e}")
             except Exception as e:
                 logger.error(f"[TASK {task_id}] Error closing browser: {e}")
+
+
+@app.route('/guard/quote', methods=['POST', 'OPTIONS'])
+def guard_webhook_receiver():
+    """
+    Webhook endpoint for Guard insurance automation
+    
+    Expected payload structure:
+    {
+        "action": "start_automation",
+        "task_id": "optional_unique_id",
+        "policy_code": "TEBP602893",
+        "quote_data": {
+            "combined_sales": "800000",
+            "gas_gallons": "500000",
+            "year_built": "2000",
+            "square_footage": "4200",
+            "mpds": "6"
+        }
+    }
+    """
+    # Handle CORS preflight
+    if request.method == 'OPTIONS':
+        return jsonify({"status": "ok"}), 200
+    
+    try:
+        # Get request data
+        if request.is_json:
+            payload = request.get_json()
+        else:
+            return jsonify({
+                "status": "error",
+                "message": "Content-Type must be application/json"
+            }), 400
+        
+        if not payload:
+            return jsonify({
+                "status": "error",
+                "message": "No payload received"
+            }), 400
+        
+        logger.info(f"[GUARD] Processing webhook request with payload keys: {list(payload.keys())}")
+        
+        # Extract data
+        action = payload.get('action', 'start_automation')
+        policy_code = payload.get('policy_code')
+        quote_data = payload.get('quote_data', {})
+        
+        # Validate required fields
+        if not policy_code:
+            return jsonify({
+                "status": "error",
+                "message": "policy_code is required"
+            }), 400
+        
+        if action == 'start_automation':
+            # Generate task_id
+            # Generate task_id for Guard
+            submission_id = payload.get('submission_id')
+            if submission_id:
+                task_id = payload.get('task_id') or f"guard_{submission_id}_{int(datetime.now().timestamp())}"
+            else:
+                task_id = payload.get('task_id') or f"guard_{policy_code}_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+            
+            logger.info(f"[GUARD] Starting Guard automation task: {task_id}")
+            logger.info(f"[GUARD] Policy Code: {policy_code}")
+            logger.info(f"[GUARD] Quote Data: {quote_data}")
+            
+            # Check if we can start immediately or need to queue
+            with worker_lock:
+                current_workers = active_workers
+                queue_size = task_queue.qsize()
+            
+            # Initialize task status
+            active_sessions[task_id] = {
+                "status": "queued" if current_workers >= MAX_WORKERS else "running",
+                "task_id": task_id,
+                "submission_id": submission_id,  # Store submission_id for webhook callback
+                "carrier": "guard",
+                "policy_code": policy_code,
+                "queued_at": datetime.now().isoformat(),
+                "quote_data": quote_data,
+                "queue_position": queue_size + 1 if current_workers >= MAX_WORKERS else 0,
+                "active_workers": current_workers,
+                "max_workers": MAX_WORKERS
+            }
+            
+            # Add to queue
+            task_queue.put(('guard', task_id, policy_code, quote_data))
+            
+            if current_workers >= MAX_WORKERS:
+                logger.info(f"[GUARD] Task {task_id} queued (position {queue_size + 1}). Active workers: {current_workers}/{MAX_WORKERS}")
+            else:
+                logger.info(f"[GUARD] Task {task_id} added to queue (will start immediately)")
+            
+            return jsonify({
+                "status": "accepted",
+                "task_id": task_id,
+                "policy_code": policy_code,
+                "message": "Guard automation task started",
+                "status_url": f"/task/{task_id}/status"
+            }), 202
+        
+        return jsonify({
+            "status": "error",
+            "message": f"Unknown action: {action}"
+        }), 400
+        
+    except Exception as e:
+        logger.error(f"[GUARD] Webhook error: {e}", exc_info=True)
+        return jsonify({
+            "status": "error",
+            "message": str(e),
+            "error_type": type(e).__name__
+        }), 500
+
+
+async def run_guard_automation_task(task_id: str, policy_code: str, quote_data: dict):
+    """
+    Run Guard automation task asynchronously
+    """
+    logger.info(f"[GUARD-TASK {task_id}] Starting Guard automation")
+    logger.info(f"[GUARD-TASK {task_id}] Policy Code: {policy_code}")
+    logger.info(f"[GUARD-TASK {task_id}] Quote Data: {json.dumps(quote_data, indent=2)}")
+    
+    # Import Guard modules
+    import sys
+    guard_path = Path(__file__).parent.parent / "guard_automation"
+    if str(guard_path) not in sys.path:
+        sys.path.insert(0, str(guard_path))
+    
+    from guard_login import GuardLogin
+    
+    login_handler = None
+    
+    try:
+        logger.info(f"[GUARD-TASK {task_id}] Initializing Guard login...")
+        login_handler = GuardLogin(task_id="default")
+        
+        # Run full automation (login + quote)
+        logger.info(f"[GUARD-TASK {task_id}] Running full automation...")
+        automation_result = await login_handler.run_full_automation(
+            policy_code=policy_code,
+            quote_data=quote_data
+        )
+        
+        if automation_result.get("success"):
+            logger.info(f"[GUARD-TASK {task_id}] ✅ SUCCESS! {automation_result.get('message')}")
+            
+            active_sessions[task_id] = {
+                "status": "completed",
+                "task_id": task_id,
+                "carrier": "guard",
+                "policy_code": policy_code,
+                "completed_at": datetime.now().isoformat(),
+                "message": automation_result.get("message"),
+                "result": automation_result
+            }
+            
+            # Notify Coversheet of successful completion
+            submission_id = None
+            if task_id in active_sessions:
+                submission_id = active_sessions[task_id].get('submission_id')
+            
+            notify_coversheet_completion(
+                task_id=task_id,
+                submission_id=submission_id,
+                success=True,
+                result_data={
+                    "policy_code": policy_code,
+                    "quote_url": automation_result.get("quote_url"),
+                    "message": automation_result.get("message", "Guard automation completed successfully")
+                },
+                carrier="guard"
+            )
+        else:
+            logger.error(f"[GUARD-TASK {task_id}] Automation failed: {automation_result.get('message')}")
+            active_sessions[task_id] = {
+                "status": "failed",
+                "task_id": task_id,
+                "carrier": "guard",
+                "policy_code": policy_code,
+                "error": automation_result.get("message"),
+                "failed_at": datetime.now().isoformat()
+            }
+            
+            # Notify Coversheet of failure
+            submission_id = None
+            if task_id in active_sessions:
+                submission_id = active_sessions[task_id].get('submission_id')
+            
+            notify_coversheet_completion(
+                task_id=task_id,
+                submission_id=submission_id,
+                success=False,
+                error=automation_result.get("message", "Automation failed"),
+                error_details=None,
+                carrier="guard"
+            )
+    
+    except Exception as e:
+        import traceback
+        error_details = traceback.format_exc()
+        error_message = str(e)
+        logger.error(f"[GUARD-TASK {task_id}] Error: {e}", exc_info=True)
+        active_sessions[task_id] = {
+            "status": "error",
+            "task_id": task_id,
+            "carrier": "guard",
+            "policy_code": policy_code,
+            "error": error_message,
+            "error_type": type(e).__name__,
+            "failed_at": datetime.now().isoformat()
+        }
+        
+        # Notify Coversheet of error
+        submission_id = None
+        if task_id in active_sessions:
+            submission_id = active_sessions[task_id].get('submission_id')
+        
+        notify_coversheet_completion(
+            task_id=task_id,
+            submission_id=submission_id,
+            success=False,
+            error=error_message,
+            error_details=error_details,
+            carrier="guard"
+        )
+    finally:
+        if login_handler:
+            try:
+                await login_handler.close()
+            except:
+                pass
 
 
 @app.route('/task/<task_id>/status', methods=['GET'])

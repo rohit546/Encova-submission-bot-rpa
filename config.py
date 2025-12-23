@@ -63,3 +63,9 @@ SESSION_DIR.mkdir(exist_ok=True)
 LOG_DIR = BASE_DIR / "logs"
 LOG_DIR.mkdir(exist_ok=True)
 
+# Coversheet webhook callback URL
+COVERSHEET_WEBHOOK_URL = os.getenv(
+    'COVERSHEET_WEBHOOK_URL',
+    'https://carrier-submission-tracker-system-for-insurance-production.up.railway.app/api/webhooks/rpa-complete'
+).strip()
+
