@@ -2250,14 +2250,43 @@ class EncovaLogin:
                 logger.info("Waiting for form to save and checking for redirect...")
                 
                 # Wait longer and check periodically for redirect
-                max_wait = 15  # Maximum seconds to wait
+                max_wait = 20  # Maximum seconds to wait (extra time for existing-account modal flow)
                 check_interval = 1  # Check every second
                 account_number = None
                 redirect_url = None
                 
+                account_existed = False
+                
                 for i in range(max_wait):
                     await asyncio.sleep(check_interval)
                     current_url = self.page.url
+                    
+                    # Check for "account already exists" modal and click OKAY
+                    try:
+                        clicked_okay = await self.page.evaluate("""
+                            () => {
+                                // Find the topmost modal (highest z-index) with the OKAY button
+                                const modals = document.querySelectorAll('.modal.fade.in');
+                                let topModal = null;
+                                let maxZ = -1;
+                                for (const m of modals) {
+                                    const z = parseInt(m.style.zIndex || window.getComputedStyle(m).zIndex) || 0;
+                                    if (z > maxZ) { maxZ = z; topModal = m; }
+                                }
+                                if (topModal) {
+                                    const btn = topModal.querySelector('button[ng-click="clickFn()"]');
+                                    if (btn) { btn.click(); return true; }
+                                }
+                                return false;
+                            }
+                        """)
+                        if clicked_okay:
+                            logger.info("Clicked OKAY on modal (account already exists) - waiting for redirect...")
+                            account_existed = True
+                            await asyncio.sleep(3)
+                            continue
+                    except Exception as e:
+                        logger.debug(f"Modal check: {e}")
                     
                     # Pattern: https://agent.encova.com/gpa/html/new-quote/ACCOUNT_NUMBER
                     import re
@@ -2268,6 +2297,15 @@ class EncovaLogin:
                         account_number = match.group(1)
                         redirect_url = current_url
                         logger.info(f"✅ Redirect detected at {i+1}s: Account Number {account_number}")
+                        break
+                    
+                    # Also check for account summary page redirect (after clicking OKAY on existing account)
+                    account_summary_pattern = r'https://agent\.encova\.com/gpa/html/account-summary/(\d+)'
+                    summary_match = re.search(account_summary_pattern, current_url)
+                    if summary_match:
+                        account_number = summary_match.group(1)
+                        redirect_url = current_url
+                        logger.info(f"✅ Redirected to account summary at {i+1}s: Account Number {account_number}")
                         break
                     
                     # Also check for account number on the page (success modal or display)
@@ -2337,14 +2375,21 @@ class EncovaLogin:
                 logger.info(f"URL after save wait: {current_url}")
                 
                 if account_number:
-                    logger.info(f"🎉 SUCCESS! New account created with Account Number: {account_number}")
-                    logger.info(f"🔗 Quote URL: {redirect_url or current_url}")
+                    if account_existed:
+                        logger.info(f"✅ Existing account found: {account_number} - continuing to quoting")
+                    else:
+                        logger.info(f"✅ New account created with Account Number: {account_number}")
+                    logger.info(f"Quote URL: {redirect_url or current_url}")
                     
                     result["success"] = True
-                    result["account_created"] = True
+                    result["account_created"] = not account_existed
                     result["account_number"] = account_number
                     result["quote_url"] = redirect_url or current_url
-                    result["message"] = f"New account created successfully! Account Number: {account_number}"
+                    result["account_existed"] = account_existed
+                    if account_existed:
+                        result["message"] = f"Account already exists (Account Number: {account_number}) - continued to account summary"
+                    else:
+                        result["message"] = f"New account created successfully! Account Number: {account_number}"
                     return result
                 else:
                     # Check if we're still on the same page (account might already exist)
@@ -2352,7 +2397,7 @@ class EncovaLogin:
                         # Check for any error messages on the page
                         error_message = await self._get_page_error_message()
                         if error_message:
-                            logger.warning(f"⚠️ Save completed but account may already exist: {error_message}")
+                            logger.warning(f"Save completed but issue detected: {error_message}")
                             result["success"] = True
                             result["account_created"] = False
                             result["message"] = f"Account may already exist: {error_message}"
@@ -2367,7 +2412,7 @@ class EncovaLogin:
                                     }
                                 """)
                                 if final_check:
-                                    logger.info(f"🎉 Found account number in final check: {final_check}")
+                                    logger.info(f"Found account number in final check: {final_check}")
                                     result["success"] = True
                                     result["account_created"] = True
                                     result["account_number"] = final_check

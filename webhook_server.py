@@ -870,9 +870,13 @@ async def run_automation_task(task_id: str, data: dict, credentials: dict, trace
         quote_result = None
         
         if success:
-            if account_created and account_number:
-                logger.info(f"[TASK {task_id}] 🎉 SUCCESS! New Account Created: {account_number}")
-                logger.info(f"[TASK {task_id}] 🔗 Quote URL: {quote_url}")
+            if account_number:
+                account_existed = automation_result.get("account_existed", False)
+                if account_existed:
+                    logger.info(f"[TASK {task_id}] Account already exists: {account_number} - proceeding to quote")
+                else:
+                    logger.info(f"[TASK {task_id}] New Account Created: {account_number}")
+                logger.info(f"[TASK {task_id}] Quote URL: {quote_url}")
                 
                 # Run quote automation if account was created
                 run_quote = data.get('run_quote_automation', True)  # Default to True
